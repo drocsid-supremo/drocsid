@@ -6,7 +6,7 @@ use std::{
 };
 
 pub fn run_server() {
-    let listener = TcpListener::bind("127.0.0.1:7878").unwrap();
+    let listener = TcpListener::bind("0.0.0.0:7878").unwrap();
 
     let clients: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
 
