@@ -4,13 +4,21 @@ use std::{
     thread,
 };
 
+use crate::database::queries;
+
 pub fn run_client(username: &str) {
     if username.is_empty() {
         println!("missing username");
         return;
     }
 
+    let history = queries::history::load_history().unwrap();
+    
     let mut stream = TcpStream::connect("127.0.0.1:7878").unwrap();
+    
+    for msg in history {
+        stream.write_all(msg.as_bytes()).unwrap(); // send all messages storaged in history of db
+    }
 
     let mut reader_stream = stream.try_clone().unwrap();
 

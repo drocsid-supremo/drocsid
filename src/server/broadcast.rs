@@ -12,10 +12,14 @@ pub fn broadcast(
     let mut clients = clients.lock().unwrap();
 
     for client in clients.iter_mut() {
-        if exclude_addr.is_some_and(|addr| client.peer_addr().ok() == Some(addr)) {
+        if exclude_addr.is_some_and(|addr| {
+            client.peer_addr().ok() == Some(addr)
+        }) {
             continue;
         }
 
-        client.write_all(msg.as_bytes()).unwrap();
+        if let Err(e) = client.write_all(msg.as_bytes()) {
+            eprintln!("broadcast error: {}", e);
+        }
     }
 }

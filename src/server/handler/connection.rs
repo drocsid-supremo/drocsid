@@ -1,7 +1,7 @@
 use std::{net::{TcpStream}, sync::{Arc, Mutex}};
 use std::io::{Read};
 
-use crate::server::broadcast::broadcast;
+use crate::{database::queries::{message::insert_message}, server::broadcast::broadcast};
 
 pub fn handle_connection(mut stream: TcpStream, clients: Arc<Mutex<Vec<TcpStream>>>) {
     let mut buffer = [0; 1024];
@@ -30,7 +30,9 @@ pub fn handle_connection(mut stream: TcpStream, clients: Arc<Mutex<Vec<TcpStream
             break;
         }
 
-        let msg = String::from_utf8_lossy(&buffer[..bytes]);
+        let msg = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+        insert_message(&username, &msg).unwrap();
+
         print!("{}", msg);
 
         broadcast(&clients, &msg, Some(sender_addr));
