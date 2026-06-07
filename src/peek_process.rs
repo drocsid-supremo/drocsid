@@ -1,14 +1,14 @@
-pub fn peek_process_ctx(args: &Vec<String>) -> (&str, &str) {
+pub fn peek_process_ctx(args: &[String]) -> (&str, &str) {
     let mut mode = "";
     let mut username = "";
 
     for arg in args {
-        if arg.starts_with("mode=") {
-            mode = &arg[5..];
+        if let Some(value) = arg.strip_prefix("mode=") {
+            mode = value;
         }
 
-        if arg.starts_with("username=") {
-            username = &arg[9..];
+        if let Some(value) = arg.strip_prefix("username=") {
+            username = value;
         }
     }
 

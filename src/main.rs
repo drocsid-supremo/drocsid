@@ -1,10 +1,10 @@
 use std::env;
 
 mod client;
-mod server;
 mod peek_process;
+mod server;
 
-use crate::{peek_process::peek_process_ctx, server::server::{run_server}, client::client::{run_client}};
+use crate::{client::run_client, peek_process::peek_process_ctx, server::run_server};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -12,7 +12,7 @@ fn main() {
 
     if mode == "server" {
         run_server();
-    } 
+    }
 
     if mode == "client" {
         run_client(username);

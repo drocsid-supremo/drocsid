@@ -1,5 +1,8 @@
-use std::{net::{TcpStream}, sync::{Arc, Mutex}};
-use std::io::{Read};
+use std::io::Read;
+use std::{
+    net::TcpStream,
+    sync::{Arc, Mutex},
+};
 
 use crate::server::broadcast::broadcast;
 
