@@ -4,12 +4,14 @@ mod client;
 mod error;
 mod peek_process;
 mod server;
+mod tui;
 
 use crate::{
     client::run_client,
     error::AppError,
     peek_process::{Command, parse_command},
     server::run_server,
+    tui::run_tui,
 };
 
 fn main() -> ExitCode {
@@ -28,5 +30,6 @@ fn run() -> Result<(), AppError> {
     match command {
         Command::Server => run_server(),
         Command::Client { username } => run_client(&username),
+        Command::Tui => run_tui(),
     }
 }

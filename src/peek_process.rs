@@ -3,6 +3,7 @@ use crate::error::AppError;
 pub enum Command {
     Server,
     Client { username: String },
+    Tui,
 }
 
 pub fn parse_command(args: &[String]) -> Result<Command, AppError> {
@@ -32,6 +33,7 @@ pub fn parse_command(args: &[String]) -> Result<Command, AppError> {
                 username: username.to_string(),
             })
         }
+        "tui" => Ok(Command::Tui),
         other => Err(AppError::InvalidMode(other.to_string())),
     }
 }
