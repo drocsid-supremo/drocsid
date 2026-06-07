@@ -1,34 +1,16 @@
-pub mod broadcast;
-pub mod handler;
-use crate::server::handler::connection::handle_connection;
-use crate::{config, error::AppError};
+mod connection;
+mod state;
 
-use std::{
-    net::{SocketAddr, TcpListener, TcpStream},
-    sync::{Arc, Mutex},
-    thread,
-};
+use std::{net::TcpListener, sync::Arc, thread};
 
-pub struct ServerState {
-    pub clients: Vec<ClientEntry>,
-    pub history: Vec<String>,
-}
+use connection::ConnectionHandler;
+use state::{new_shared_state, register_client};
 
-pub struct ClientEntry {
-    pub addr: SocketAddr,
-    pub stream: TcpStream,
-    pub username: Option<String>,
-}
+use crate::{config::ServerConfig, error::AppError};
 
-pub type Clients = Arc<Mutex<ServerState>>;
-
-pub fn run_server() -> Result<(), AppError> {
-    let bind_addr = config::server_bind_addr();
-    let listener = TcpListener::bind(&bind_addr)?;
-    let clients: Clients = Arc::new(Mutex::new(ServerState {
-        clients: Vec::new(),
-        history: Vec::new(),
-    }));
+pub fn run_server(server_config: &ServerConfig) -> Result<(), AppError> {
+    let listener = TcpListener::bind(&server_config.bind_addr)?;
+    let state = new_shared_state();
 
     for stream in listener.incoming() {
         let stream = match stream {
@@ -39,29 +21,21 @@ pub fn run_server() -> Result<(), AppError> {
             }
         };
 
-        if let Err(error) = register_client(&clients, &stream) {
+        if let Err(error) = register_client(&state, &stream) {
             eprintln!("failed to register client: {error}");
             continue;
         }
 
-        let clients_clone = Arc::clone(&clients);
+        let state = Arc::clone(&state);
+        let simulated_latency = server_config.simulated_latency;
 
         thread::spawn(move || {
-            if let Err(error) = handle_connection(stream, clients_clone) {
+            let handler = ConnectionHandler::new(state, simulated_latency);
+            if let Err(error) = handler.serve(stream) {
                 eprintln!("connection handler failed: {error}");
             }
         });
     }
 
-    Ok(())
-}
-
-fn register_client(clients: &Clients, stream: &TcpStream) -> Result<(), AppError> {
-    let mut state = clients.lock().map_err(|_| AppError::ClientStatePoisoned)?;
-    state.clients.push(ClientEntry {
-        addr: stream.peer_addr()?,
-        stream: stream.try_clone()?,
-        username: None,
-    });
     Ok(())
 }

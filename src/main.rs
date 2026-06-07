@@ -1,16 +1,18 @@
-use std::{env, process::ExitCode};
+use std::process::ExitCode;
 
+mod cli;
 mod client;
 mod config;
 mod error;
-mod peek_process;
+mod protocol;
 mod server;
 mod tui;
 
 use crate::{
+    cli::{Command, parse_command},
     client::run_client,
+    config::AppConfig,
     error::AppError,
-    peek_process::{Command, parse_command},
     server::run_server,
     tui::run_tui,
 };
@@ -25,14 +27,12 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), AppError> {
-    config::load_env();
-
-    let args: Vec<String> = env::args().collect();
-    let command = parse_command(&args)?;
+    let config = AppConfig::load();
+    let command = parse_command(std::env::args())?;
 
     match command {
-        Command::Server => run_server(),
-        Command::Client { username } => run_client(&username),
+        Command::Server => run_server(&config.server),
+        Command::Client { username } => run_client(&username, &config.server),
         Command::Tui => run_tui(),
     }
 }
