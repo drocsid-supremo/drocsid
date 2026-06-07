@@ -455,8 +455,7 @@ fn sidebar_text(app: &ChatApp) -> Text<'static> {
     } else {
         Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)
     };
-
-    Text::from(vec![
+    let mut lines = vec![
         Line::from(vec!["User: ".into(), app.username.clone().bold()]),
         Line::from(vec![
             "Status: ".into(),
@@ -470,7 +469,28 @@ fn sidebar_text(app: &ChatApp) -> Text<'static> {
             "Online: ".into(),
             app.connected_users.len().to_string().yellow(),
         ]),
-    ])
+        Line::from(""),
+        Line::from(Span::styled(
+            "users",
+            Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+        )),
+    ];
+
+    if app.connected_users.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  nobody connected",
+            Style::new().fg(Color::DarkGray),
+        )));
+    } else {
+        for user in &app.connected_users {
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::new()),
+                Span::styled(user.clone(), Style::new().fg(Color::Cyan)),
+            ]));
+        }
+    }
+
+    Text::from(lines)
 }
 
 fn render_mention_popup(frame: &mut Frame, app: &ChatApp, input_area: Rect) {
