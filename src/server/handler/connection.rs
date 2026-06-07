@@ -1,7 +1,11 @@
-use std::io::{ErrorKind, Read};
-use std::net::TcpStream;
+use std::{
+    io::{ErrorKind, Read},
+    net::TcpStream,
+    thread,
+};
 
 use crate::{
+    config,
     error::AppError,
     server::{
         Clients,
@@ -12,6 +16,7 @@ use crate::{
 pub fn handle_connection(mut stream: TcpStream, clients: Clients) -> Result<(), AppError> {
     let mut buffer = [0; 1024];
     let sender_addr = stream.peer_addr()?;
+    let simulated_latency = config::server_simulated_latency();
 
     let bytes = stream.read(&mut buffer)?;
 
@@ -56,7 +61,11 @@ pub fn handle_connection(mut stream: TcpStream, clients: Clients) -> Result<(), 
         let msg = String::from_utf8_lossy(&buffer[..bytes]);
         print!("{}", msg);
 
-        broadcast(&clients, &msg, Some(sender_addr))?;
+        if !simulated_latency.is_zero() {
+            thread::sleep(simulated_latency);
+        }
+
+        broadcast(&clients, &msg, None)?;
     }
 }
 

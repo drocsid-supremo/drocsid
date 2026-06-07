@@ -22,10 +22,21 @@ enum NetworkEvent {
     Disconnected(String),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MessageState {
+    Pending,
+    Confirmed,
+}
+
+struct ChatMessage {
+    text: String,
+    state: MessageState,
+}
+
 struct ChatApp {
     username: String,
     input: String,
-    messages: Vec<String>,
+    messages: Vec<ChatMessage>,
     status: String,
     connected: bool,
     should_quit: bool,
@@ -39,8 +50,14 @@ impl ChatApp {
             username: username.to_string(),
             input: String::new(),
             messages: vec![
-                format!("Connected to {server_addr}"),
-                "Type a message and press Enter.".to_string(),
+                ChatMessage {
+                    text: format!("[system] Connected to {server_addr}"),
+                    state: MessageState::Confirmed,
+                },
+                ChatMessage {
+                    text: "[system] Type a message and press Enter.".to_string(),
+                    state: MessageState::Confirmed,
+                },
             ],
             status: "online".to_string(),
             connected: true,
@@ -48,13 +65,29 @@ impl ChatApp {
         }
     }
 
-    fn push_message(&mut self, message: impl Into<String>) {
-        self.messages.push(message.into());
+    fn push_message(&mut self, message: impl Into<String>, state: MessageState) {
+        self.messages.push(ChatMessage {
+            text: message.into(),
+            state,
+        });
 
         if self.messages.len() > 300 {
             let overflow = self.messages.len() - 300;
             self.messages.drain(0..overflow);
         }
+    }
+
+    fn confirm_message(&mut self, message: &str) -> bool {
+        if let Some(entry) = self
+            .messages
+            .iter_mut()
+            .find(|entry| entry.text == message && entry.state == MessageState::Pending)
+        {
+            entry.state = MessageState::Confirmed;
+            return true;
+        }
+
+        false
     }
 }
 
@@ -134,11 +167,15 @@ fn spawn_reader(mut reader_stream: TcpStream, tx: Sender<NetworkEvent>) {
 fn drain_network_events(app: &mut ChatApp, rx: &Receiver<NetworkEvent>) {
     loop {
         match rx.try_recv() {
-            Ok(NetworkEvent::Message(message)) => app.push_message(message),
+            Ok(NetworkEvent::Message(message)) => {
+                if !app.confirm_message(&message) {
+                    app.push_message(message, MessageState::Confirmed);
+                }
+            }
             Ok(NetworkEvent::Disconnected(reason)) => {
                 app.connected = false;
                 app.status = reason.clone();
-                app.push_message(format!("[system] {reason}"));
+                app.push_message(format!("[system] {reason}"), MessageState::Confirmed);
             }
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
         }
@@ -181,7 +218,10 @@ fn submit_input(app: &mut ChatApp, stream: &mut TcpStream) -> std::io::Result<()
     }
 
     if !app.connected {
-        app.push_message("[system] message not sent because the client is offline");
+        app.push_message(
+            "[system] message not sent because the client is offline",
+            MessageState::Confirmed,
+        );
         return Ok(());
     }
 
@@ -191,7 +231,10 @@ fn submit_input(app: &mut ChatApp, stream: &mut TcpStream) -> std::io::Result<()
     if let Err(error) = stream.write_all(wire_message.as_bytes()) {
         app.connected = false;
         app.status = "offline".to_string();
-        app.push_message(format!("[system] failed to send message: {error}"));
+        app.push_message(
+            format!("[system] failed to send message: {error}"),
+            MessageState::Confirmed,
+        );
 
         if matches!(
             error.kind(),
@@ -203,7 +246,7 @@ fn submit_input(app: &mut ChatApp, stream: &mut TcpStream) -> std::io::Result<()
         return Err(error);
     }
 
-    app.push_message(formatted);
+    app.push_message(formatted, MessageState::Pending);
     Ok(())
 }
 
@@ -288,18 +331,23 @@ fn messages_text(app: &ChatApp) -> Text<'static> {
         app.messages
             .iter()
             .map(|message| {
-                if message.starts_with("[system]") {
+                if message.text.starts_with("[system]") {
                     Line::from(vec![Span::styled(
-                        message.clone(),
+                        message.text.clone(),
                         Style::new().fg(Color::Magenta),
                     )])
-                } else if message.starts_with('[') {
+                } else if message.state == MessageState::Pending {
                     Line::from(vec![Span::styled(
-                        message.clone(),
+                        message.text.clone(),
+                        Style::new().fg(Color::DarkGray),
+                    )])
+                } else if message.text.starts_with('[') {
+                    Line::from(vec![Span::styled(
+                        message.text.clone(),
                         Style::new().fg(Color::Cyan),
                     )])
                 } else {
-                    Line::from(message.clone())
+                    Line::from(message.text.clone())
                 }
             })
             .collect::<Vec<_>>(),
@@ -325,8 +373,8 @@ fn sidebar_text(app: &ChatApp) -> Text<'static> {
         ]),
         Line::from(""),
         Line::from("Notes"),
-        Line::from("- local echo is enabled"),
-        Line::from("- server messages stream live"),
+        Line::from("- gray means pending ack"),
+        Line::from("- color normalizes on echo"),
         Line::from("- offline mode blocks sends"),
     ])
 }
