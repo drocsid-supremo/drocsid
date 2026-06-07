@@ -9,7 +9,7 @@ use crate::{
     error::AppError,
     server::{
         Clients,
-        broadcast::{broadcast, remove_client},
+        broadcast::{broadcast, broadcast_presence, remove_client, set_client_username},
     },
 };
 
@@ -30,6 +30,9 @@ pub fn handle_connection(mut stream: TcpStream, clients: Clients) -> Result<(), 
         remove_client(&clients, sender_addr)?;
         return Err(AppError::EmptyHandshakeUsername);
     }
+
+    set_client_username(&clients, sender_addr, &username)?;
+    broadcast_presence(&clients)?;
 
     let join_msg = format!("{} has entered the chat. Say hello!\n", username);
     println!("{}", join_msg.trim());
@@ -79,6 +82,7 @@ fn disconnect_client(
     let leave_msg = format!("{} has left the chat\n", username);
     println!("{}", leave_msg.trim());
     broadcast(clients, &leave_msg, None)?;
+    broadcast_presence(clients)?;
 
     Ok(())
 }

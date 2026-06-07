@@ -18,8 +18,12 @@ use ratatui::{
 
 use crate::{config, error::AppError};
 
+const PASTEL_YELLOW: Color = Color::Rgb(245, 229, 168);
+const PASTEL_YELLOW_BORDER: Color = Color::Rgb(226, 208, 140);
+
 enum NetworkEvent {
     Message(String),
+    UserList(Vec<String>),
     Disconnected(String),
 }
 
@@ -38,6 +42,8 @@ struct ChatApp {
     username: String,
     input: String,
     messages: Vec<ChatMessage>,
+    connected_users: Vec<String>,
+    mention_selection: usize,
     status: String,
     connected: bool,
     should_quit: bool,
@@ -60,6 +66,8 @@ impl ChatApp {
                     state: MessageState::Confirmed,
                 },
             ],
+            connected_users: vec![username.to_string()],
+            mention_selection: 0,
             status: "online".to_string(),
             connected: true,
             should_quit: false,
@@ -89,6 +97,19 @@ impl ChatApp {
         }
 
         false
+    }
+
+    fn mention_candidates(&self) -> Vec<String> {
+        let Some(query) = active_mention_query(&self.input) else {
+            return Vec::new();
+        };
+
+        let query_lower = query.to_ascii_lowercase();
+        self.connected_users
+            .iter()
+            .filter(|user| user.to_ascii_lowercase().starts_with(&query_lower))
+            .cloned()
+            .collect()
     }
 }
 
@@ -158,7 +179,11 @@ fn spawn_reader(mut reader_stream: TcpStream, tx: Sender<NetworkEvent>) {
                 pending.drain(..=newline_index);
 
                 if !line.trim().is_empty() {
-                    let _ = tx.send(NetworkEvent::Message(line));
+                    if let Some(users) = parse_users_event(&line) {
+                        let _ = tx.send(NetworkEvent::UserList(users));
+                    } else {
+                        let _ = tx.send(NetworkEvent::Message(line));
+                    }
                 }
             }
         }
@@ -171,6 +196,15 @@ fn drain_network_events(app: &mut ChatApp, rx: &Receiver<NetworkEvent>) {
             Ok(NetworkEvent::Message(message)) => {
                 if !app.confirm_message(&message) {
                     app.push_message(message, MessageState::Confirmed);
+                }
+            }
+            Ok(NetworkEvent::UserList(users)) => {
+                app.connected_users = users;
+                let candidates_len = app.mention_candidates().len();
+                if candidates_len == 0 {
+                    app.mention_selection = 0;
+                } else if app.mention_selection >= candidates_len {
+                    app.mention_selection = candidates_len - 1;
                 }
             }
             Ok(NetworkEvent::Disconnected(reason)) => {
@@ -194,12 +228,17 @@ fn handle_input(app: &mut ChatApp, stream: &mut TcpStream) -> std::io::Result<()
                 app.should_quit = true;
             }
             KeyCode::Esc => app.should_quit = true,
+            KeyCode::Up => select_previous_mention(app),
+            KeyCode::Down => select_next_mention(app),
+            KeyCode::Tab => apply_selected_mention(app),
             KeyCode::Enter => submit_input(app, stream)?,
             KeyCode::Backspace => {
                 app.input.pop();
+                reset_mention_selection(app);
             }
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.input.push(character);
+                reset_mention_selection(app);
             }
             _ => {}
         },
@@ -296,7 +335,7 @@ fn render(frame: &mut Frame, app: &ChatApp) {
 
     let input_block = Block::bordered()
         .title("Input")
-        .border_style(Style::new().fg(Color::Yellow));
+        .border_style(Style::new().fg(PASTEL_YELLOW_BORDER));
     let input_area = input_block.inner(layout[2]);
     let input = Paragraph::new(app.input.as_str())
         .block(input_block)
@@ -305,6 +344,8 @@ fn render(frame: &mut Frame, app: &ChatApp) {
     let help = Paragraph::new(Line::from(vec![
         "Enter".bold().yellow(),
         " send  ".into(),
+        "Tab".bold().yellow(),
+        " mention  ".into(),
         "Esc".bold().yellow(),
         " quit  ".into(),
         "Ctrl+Q".bold().yellow(),
@@ -318,6 +359,7 @@ fn render(frame: &mut Frame, app: &ChatApp) {
     frame.render_widget(sidebar, body[1]);
     frame.render_widget(input, layout[2]);
     frame.render_widget(help, layout[3]);
+    render_mention_popup(frame, app, input_area);
 
     let cursor_x = input_area
         .x
@@ -329,10 +371,15 @@ fn render(frame: &mut Frame, app: &ChatApp) {
 }
 
 fn messages_text(app: &ChatApp) -> Text<'static> {
-    Text::from(app.messages.iter().map(chat_line).collect::<Vec<_>>())
+    Text::from(
+        app.messages
+            .iter()
+            .map(|message| chat_line(message, &app.username))
+            .collect::<Vec<_>>(),
+    )
 }
 
-fn chat_line(message: &ChatMessage) -> Line<'static> {
+fn chat_line(message: &ChatMessage, current_username: &str) -> Line<'static> {
     if message.text.starts_with("[system]") {
         return Line::from(vec![Span::styled(
             message.text.clone(),
@@ -341,6 +388,7 @@ fn chat_line(message: &ChatMessage) -> Line<'static> {
     }
 
     if let Some((username, timestamp, body)) = parse_chat_message(&message.text) {
+        let mention_highlight = message_mentions_user(body, current_username);
         let username_style = if message.state == MessageState::Pending {
             Style::new().fg(Color::Gray)
         } else {
@@ -353,10 +401,21 @@ fn chat_line(message: &ChatMessage) -> Line<'static> {
             Style::new().fg(Color::White)
         };
 
+        let (username_style, timestamp_style, colon_style, body_style) = if mention_highlight {
+            (
+                username_style.bg(PASTEL_YELLOW),
+                timestamp_style.bg(PASTEL_YELLOW),
+                body_style.fg(Color::Black).bg(PASTEL_YELLOW),
+                body_style.fg(Color::Black).bg(PASTEL_YELLOW),
+            )
+        } else {
+            (username_style, timestamp_style, body_style, body_style)
+        };
+
         return Line::from(vec![
             Span::styled(format!("[{username}]"), username_style),
             Span::styled(format!("({timestamp})"), timestamp_style),
-            Span::styled(":", body_style),
+            Span::styled(":", colon_style),
             Span::raw(" "),
             Span::styled(body.to_string(), body_style),
         ]);
@@ -402,7 +461,58 @@ fn sidebar_text(app: &ChatApp) -> Text<'static> {
             "Messages: ".into(),
             app.messages.len().to_string().yellow(),
         ]),
+        Line::from(vec![
+            "Online: ".into(),
+            app.connected_users.len().to_string().yellow(),
+        ]),
     ])
+}
+
+fn render_mention_popup(frame: &mut Frame, app: &ChatApp, input_area: Rect) {
+    let candidates = app.mention_candidates();
+    if candidates.is_empty() {
+        return;
+    }
+
+    let height = candidates.len().min(5) as u16 + 2;
+    let width = candidates
+        .iter()
+        .map(|candidate| candidate.len() as u16 + 3)
+        .max()
+        .unwrap_or(12)
+        .max(18);
+    let popup_area = Rect {
+        x: input_area.x,
+        y: input_area.y.saturating_sub(height + 1),
+        width: width.min(frame.area().width.saturating_sub(input_area.x)),
+        height,
+    };
+
+    let lines = candidates
+        .iter()
+        .enumerate()
+        .take(5)
+        .map(|(index, candidate)| {
+            let style = if index == app.mention_selection {
+                Style::new().fg(Color::Black).bg(PASTEL_YELLOW)
+            } else {
+                Style::new().fg(Color::White)
+            };
+
+            Line::from(vec![Span::styled(format!("@{candidate}"), style)])
+        })
+        .collect::<Vec<_>>();
+
+    let popup = Paragraph::new(Text::from(lines))
+        .block(
+            Block::bordered()
+                .title("Mention")
+                .border_style(Style::new().fg(PASTEL_YELLOW_BORDER)),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(popup, popup_area);
 }
 
 fn message_scroll_offset(text: &Text<'_>, area: Rect) -> u16 {
@@ -410,4 +520,100 @@ fn message_scroll_offset(text: &Text<'_>, area: Rect) -> u16 {
     let total_lines = text.lines.len();
 
     total_lines.saturating_sub(visible_height) as u16
+}
+
+fn parse_users_event(line: &str) -> Option<Vec<String>> {
+    let payload = line.strip_prefix("__users__:")?;
+    if payload.is_empty() {
+        return Some(Vec::new());
+    }
+
+    Some(
+        payload
+            .split(',')
+            .map(str::trim)
+            .filter(|user| !user.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+    )
+}
+
+fn active_mention_query(input: &str) -> Option<&str> {
+    let at_index = input.rfind('@')?;
+    let mention = input.get(at_index + 1..)?;
+
+    if mention.contains(char::is_whitespace) {
+        return None;
+    }
+
+    if at_index > 0 {
+        let previous = input[..at_index].chars().last()?;
+        if !previous.is_whitespace() {
+            return None;
+        }
+    }
+
+    Some(mention)
+}
+
+fn select_previous_mention(app: &mut ChatApp) {
+    let candidates = app.mention_candidates();
+    if candidates.is_empty() {
+        return;
+    }
+
+    if app.mention_selection == 0 {
+        app.mention_selection = candidates.len() - 1;
+    } else {
+        app.mention_selection -= 1;
+    }
+}
+
+fn select_next_mention(app: &mut ChatApp) {
+    let candidates = app.mention_candidates();
+    if candidates.is_empty() {
+        return;
+    }
+
+    app.mention_selection = (app.mention_selection + 1) % candidates.len();
+}
+
+fn apply_selected_mention(app: &mut ChatApp) {
+    let candidates = app.mention_candidates();
+    if candidates.is_empty() {
+        return;
+    }
+
+    let mention = &candidates[app.mention_selection];
+    let Some(at_index) = app.input.rfind('@') else {
+        return;
+    };
+
+    app.input.truncate(at_index);
+    app.input.push('@');
+    app.input.push_str(mention);
+    app.input.push(' ');
+    app.mention_selection = 0;
+}
+
+fn reset_mention_selection(app: &mut ChatApp) {
+    app.mention_selection = 0;
+}
+
+fn message_mentions_user(body: &str, username: &str) -> bool {
+    let needle = format!("@{username}");
+    let mut search_start = 0;
+
+    while let Some(relative_index) = body[search_start..].find(&needle) {
+        let index = search_start + relative_index;
+        let after = body[index + needle.len()..].chars().next();
+
+        if after.is_none_or(|ch| !ch.is_alphanumeric() && ch != '_') {
+            return true;
+        }
+
+        search_start = index + needle.len();
+    }
+
+    false
 }

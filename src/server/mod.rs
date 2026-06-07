@@ -4,12 +4,18 @@ use crate::server::handler::connection::handle_connection;
 use crate::{config, error::AppError};
 
 use std::{
-    net::{TcpListener, TcpStream},
+    net::{SocketAddr, TcpListener, TcpStream},
     sync::{Arc, Mutex},
     thread,
 };
 
-pub type Clients = Arc<Mutex<Vec<TcpStream>>>;
+pub struct ClientEntry {
+    pub addr: SocketAddr,
+    pub stream: TcpStream,
+    pub username: Option<String>,
+}
+
+pub type Clients = Arc<Mutex<Vec<ClientEntry>>>;
 
 pub fn run_server() -> Result<(), AppError> {
     let bind_addr = config::server_bind_addr();
@@ -44,6 +50,10 @@ pub fn run_server() -> Result<(), AppError> {
 
 fn register_client(clients: &Clients, stream: &TcpStream) -> Result<(), AppError> {
     let mut clients = clients.lock().map_err(|_| AppError::ClientStatePoisoned)?;
-    clients.push(stream.try_clone()?);
+    clients.push(ClientEntry {
+        addr: stream.peer_addr()?,
+        stream: stream.try_clone()?,
+        username: None,
+    });
     Ok(())
 }
