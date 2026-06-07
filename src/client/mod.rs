@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use chrono::Local;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
@@ -225,7 +226,8 @@ fn submit_input(app: &mut ChatApp, stream: &mut TcpStream) -> std::io::Result<()
         return Ok(());
     }
 
-    let formatted = format!("[{}]: {}", app.username, content);
+    let current_time = Local::now().format("%H:%M");
+    let formatted = format!("[{}]({}): {}", app.username, current_time, content);
     let wire_message = format!("{formatted}\n");
 
     if let Err(error) = stream.write_all(wire_message.as_bytes()) {
@@ -327,31 +329,60 @@ fn render(frame: &mut Frame, app: &ChatApp) {
 }
 
 fn messages_text(app: &ChatApp) -> Text<'static> {
-    Text::from(
-        app.messages
-            .iter()
-            .map(|message| {
-                if message.text.starts_with("[system]") {
-                    Line::from(vec![Span::styled(
-                        message.text.clone(),
-                        Style::new().fg(Color::Magenta),
-                    )])
-                } else if message.state == MessageState::Pending {
-                    Line::from(vec![Span::styled(
-                        message.text.clone(),
-                        Style::new().fg(Color::DarkGray),
-                    )])
-                } else if message.text.starts_with('[') {
-                    Line::from(vec![Span::styled(
-                        message.text.clone(),
-                        Style::new().fg(Color::Cyan),
-                    )])
-                } else {
-                    Line::from(message.text.clone())
-                }
-            })
-            .collect::<Vec<_>>(),
-    )
+    Text::from(app.messages.iter().map(chat_line).collect::<Vec<_>>())
+}
+
+fn chat_line(message: &ChatMessage) -> Line<'static> {
+    if message.text.starts_with("[system]") {
+        return Line::from(vec![Span::styled(
+            message.text.clone(),
+            Style::new().fg(Color::Magenta),
+        )]);
+    }
+
+    if let Some((username, timestamp, body)) = parse_chat_message(&message.text) {
+        let username_style = if message.state == MessageState::Pending {
+            Style::new().fg(Color::Gray)
+        } else {
+            Style::new().fg(Color::Cyan)
+        };
+        let timestamp_style = Style::new().fg(Color::DarkGray).add_modifier(Modifier::DIM);
+        let body_style = if message.state == MessageState::Pending {
+            Style::new().fg(Color::Gray)
+        } else {
+            Style::new().fg(Color::White)
+        };
+
+        return Line::from(vec![
+            Span::styled(format!("[{username}]"), username_style),
+            Span::styled(format!("({timestamp})"), timestamp_style),
+            Span::styled(":", body_style),
+            Span::raw(" "),
+            Span::styled(body.to_string(), body_style),
+        ]);
+    }
+
+    let fallback_style = if message.state == MessageState::Pending {
+        Style::new().fg(Color::Gray)
+    } else {
+        Style::new()
+    };
+
+    Line::from(vec![Span::styled(message.text.clone(), fallback_style)])
+}
+
+fn parse_chat_message(message: &str) -> Option<(&str, &str, &str)> {
+    let close_user = message.find("](")?;
+    let close_time = message[close_user + 2..].find("): ")? + close_user + 2;
+    let username = message.get(1..close_user)?;
+    let timestamp = message.get(close_user + 2..close_time)?;
+    let body = message.get(close_time + 3..)?;
+
+    if message.starts_with('[') {
+        Some((username, timestamp, body))
+    } else {
+        None
+    }
 }
 
 fn sidebar_text(app: &ChatApp) -> Text<'static> {

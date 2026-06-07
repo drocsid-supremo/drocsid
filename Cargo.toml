@@ -14,6 +14,7 @@ features = [
 ]
 
 [dependencies]
+chrono = "0.4"
 crossterm = "0.29"
 dotenvy = "0.15"
 ratatui = "0.30.1"
