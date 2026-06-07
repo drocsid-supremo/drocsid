@@ -46,6 +46,7 @@ struct ChatApp {
     mention_selection: usize,
     status: String,
     connected: bool,
+    exit_notice: Option<String>,
     should_quit: bool,
 }
 
@@ -70,6 +71,7 @@ impl ChatApp {
             mention_selection: 0,
             status: "online".to_string(),
             connected: true,
+            exit_notice: None,
             should_quit: false,
         }
     }
@@ -111,6 +113,14 @@ impl ChatApp {
             .cloned()
             .collect()
     }
+
+    fn begin_shutdown(&mut self, reason: impl Into<String>) {
+        let reason = reason.into();
+        self.connected = false;
+        self.status = reason.clone();
+        self.push_message(format!("[system] {reason}"), MessageState::Confirmed);
+        self.exit_notice = Some(reason);
+    }
 }
 
 pub fn run_client(username: &str) -> Result<(), AppError> {
@@ -128,9 +138,9 @@ pub fn run_client(username: &str) -> Result<(), AppError> {
     let (tx, rx) = mpsc::channel();
     spawn_reader(reader_stream, tx);
 
-    ratatui::run(|terminal| -> std::io::Result<()> {
-        let mut app = ChatApp::new(username);
+    let mut app = ChatApp::new(username);
 
+    ratatui::run(|terminal| -> std::io::Result<()> {
         while !app.should_quit {
             drain_network_events(&mut app, &rx);
             terminal.draw(|frame| render(frame, &app))?;
@@ -139,6 +149,10 @@ pub fn run_client(username: &str) -> Result<(), AppError> {
 
         Ok(())
     })?;
+
+    if let Some(exit_notice) = app.exit_notice {
+        println!("client closed: {exit_notice}");
+    }
 
     Ok(())
 }
@@ -208,9 +222,7 @@ fn drain_network_events(app: &mut ChatApp, rx: &Receiver<NetworkEvent>) {
                 }
             }
             Ok(NetworkEvent::Disconnected(reason)) => {
-                app.connected = false;
-                app.status = reason.clone();
-                app.push_message(format!("[system] {reason}"), MessageState::Confirmed);
+                app.begin_shutdown(reason);
             }
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
         }
@@ -223,25 +235,34 @@ fn handle_input(app: &mut ChatApp, stream: &mut TcpStream) -> std::io::Result<()
     }
 
     match event::read()? {
-        Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.should_quit = true;
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            if app.exit_notice.is_some() {
+                if key.code == KeyCode::Enter {
+                    app.should_quit = true;
+                }
+                return Ok(());
             }
-            KeyCode::Esc => app.should_quit = true,
-            KeyCode::Up => select_previous_mention(app),
-            KeyCode::Down => select_next_mention(app),
-            KeyCode::Tab => apply_selected_mention(app),
-            KeyCode::Enter => submit_input(app, stream)?,
-            KeyCode::Backspace => {
-                app.input.pop();
-                reset_mention_selection(app);
+
+            match key.code {
+                KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    app.should_quit = true;
+                }
+                KeyCode::Esc => app.should_quit = true,
+                KeyCode::Up => select_previous_mention(app),
+                KeyCode::Down => select_next_mention(app),
+                KeyCode::Tab => apply_selected_mention(app),
+                KeyCode::Enter => submit_input(app, stream)?,
+                KeyCode::Backspace => {
+                    app.input.pop();
+                    reset_mention_selection(app);
+                }
+                KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    app.input.push(character);
+                    reset_mention_selection(app);
+                }
+                _ => {}
             }
-            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.input.push(character);
-                reset_mention_selection(app);
-            }
-            _ => {}
-        },
+        }
         Event::Resize(_, _) => {}
         _ => {}
     }
@@ -270,19 +291,20 @@ fn submit_input(app: &mut ChatApp, stream: &mut TcpStream) -> std::io::Result<()
     let wire_message = format!("{formatted}\n");
 
     if let Err(error) = stream.write_all(wire_message.as_bytes()) {
+        if matches!(
+            error.kind(),
+            ErrorKind::BrokenPipe | ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset
+        ) {
+            app.begin_shutdown(format!("server unavailable: {error}"));
+            return Ok(());
+        }
+
         app.connected = false;
         app.status = "offline".to_string();
         app.push_message(
             format!("[system] failed to send message: {error}"),
             MessageState::Confirmed,
         );
-
-        if matches!(
-            error.kind(),
-            ErrorKind::BrokenPipe | ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset
-        ) {
-            return Ok(());
-        }
 
         return Err(error);
     }
@@ -360,6 +382,7 @@ fn render(frame: &mut Frame, app: &ChatApp) {
     frame.render_widget(input, layout[2]);
     frame.render_widget(help, layout[3]);
     render_mention_popup(frame, app, input_area);
+    render_shutdown_popup(frame, app);
 
     let cursor_x = input_area
         .x
@@ -450,31 +473,10 @@ fn parse_chat_message(message: &str) -> Option<(&str, &str, &str)> {
 }
 
 fn sidebar_text(app: &ChatApp) -> Text<'static> {
-    let status_style = if app.connected {
-        Style::new().fg(Color::Green).add_modifier(Modifier::BOLD)
-    } else {
-        Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)
-    };
-    let mut lines = vec![
-        Line::from(vec!["User: ".into(), app.username.clone().bold()]),
-        Line::from(vec![
-            "Status: ".into(),
-            Span::styled(app.status.clone(), status_style),
-        ]),
-        Line::from(vec![
-            "Messages: ".into(),
-            app.messages.len().to_string().yellow(),
-        ]),
-        Line::from(vec![
-            "Online: ".into(),
-            app.connected_users.len().to_string().yellow(),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "users",
-            Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
-        )),
-    ];
+    let mut lines = vec![Line::from(Span::styled(
+        "users",
+        Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+    ))];
 
     if app.connected_users.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -540,11 +542,66 @@ fn render_mention_popup(frame: &mut Frame, app: &ChatApp, input_area: Rect) {
     frame.render_widget(popup, popup_area);
 }
 
+fn render_shutdown_popup(frame: &mut Frame, app: &ChatApp) {
+    let Some(reason) = &app.exit_notice else {
+        return;
+    };
+
+    let popup_area = centered_rect(frame.area(), 50, 20);
+    let popup = Paragraph::new(Text::from(vec![
+        Line::from(Span::styled(
+            "Server connection lost",
+            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(reason.clone()),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[ OK ]",
+            Style::new()
+                .fg(Color::Black)
+                .bg(PASTEL_YELLOW)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Press Enter to close",
+            Style::new().fg(Color::DarkGray),
+        )),
+    ]))
+    .block(
+        Block::bordered()
+            .title("Disconnected")
+            .border_style(Style::new().fg(Color::Red)),
+    )
+    .centered()
+    .wrap(Wrap { trim: false });
+
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(popup, popup_area);
+}
+
 fn message_scroll_offset(text: &Text<'_>, area: Rect) -> u16 {
     let visible_height = area.height.saturating_sub(1) as usize;
     let total_lines = text.lines.len();
 
     total_lines.saturating_sub(visible_height) as u16
+}
+
+fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
+    let vertical = Layout::vertical([
+        Constraint::Percentage((100 - height_percent) / 2),
+        Constraint::Percentage(height_percent),
+        Constraint::Percentage((100 - height_percent) / 2),
+    ])
+    .split(area);
+
+    Layout::horizontal([
+        Constraint::Percentage((100 - width_percent) / 2),
+        Constraint::Percentage(width_percent),
+        Constraint::Percentage((100 - width_percent) / 2),
+    ])
+    .split(vertical[1])[1]
 }
 
 fn parse_users_event(line: &str) -> Option<Vec<String>> {
