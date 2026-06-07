@@ -1,11 +1,22 @@
 use std::{net::{TcpStream}, sync::{Arc, Mutex}};
-use std::io::{Read};
+use std::io::{Read, Write};
 
-use crate::{database::queries::{message::insert_message}, server::broadcast::broadcast};
+use crate::{database::queries::{self, message::insert_message}, server::broadcast::broadcast};
 
 pub fn handle_connection(mut stream: TcpStream, clients: Arc<Mutex<Vec<TcpStream>>>) {
     let mut buffer = [0; 1024];
     let sender_addr = stream.peer_addr().unwrap();
+
+    let history = queries::history::load_history().unwrap();
+
+    for msg in history {
+        println!("{}", msg);
+
+        stream.write_all(msg.as_bytes()).unwrap();
+        stream.write_all(b"\n").unwrap();
+    }
+
+    println!("--------------------\n");
 
     let bytes = stream.read(&mut buffer).unwrap();
 
@@ -13,10 +24,13 @@ pub fn handle_connection(mut stream: TcpStream, clients: Arc<Mutex<Vec<TcpStream
         return;
     }
 
-    let username = String::from_utf8_lossy(&buffer[..bytes]).trim().to_string();
-    let join_msg = format!("{} has entered the chat. Say hello!\n", username);
-    println!("{}", join_msg.trim());
+    let username = String::from_utf8_lossy(&buffer[..bytes])
+        .trim()
+        .to_string();
 
+    let join_msg = format!("{} has entered the chat. Say hello!\n", username);
+
+    println!("{}", join_msg.trim());
     broadcast(&clients, &join_msg, None);
 
     loop {
@@ -31,6 +45,7 @@ pub fn handle_connection(mut stream: TcpStream, clients: Arc<Mutex<Vec<TcpStream
         }
 
         let msg = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+
         insert_message(&username, &msg).unwrap();
 
         print!("{}", msg);
