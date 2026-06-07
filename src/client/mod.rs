@@ -305,7 +305,7 @@ fn render(frame: &mut Frame, app: &ChatApp) {
 
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
-            "discordia",
+            "drocsid",
             Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),

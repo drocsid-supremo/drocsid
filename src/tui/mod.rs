@@ -43,7 +43,7 @@ fn render(frame: &mut Frame, app: &App) {
 
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
-            "discordia tui",
+            "drocsid tui",
             Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
