@@ -9,18 +9,26 @@ use std::{
     thread,
 };
 
+pub struct ServerState {
+    pub clients: Vec<ClientEntry>,
+    pub history: Vec<String>,
+}
+
 pub struct ClientEntry {
     pub addr: SocketAddr,
     pub stream: TcpStream,
     pub username: Option<String>,
 }
 
-pub type Clients = Arc<Mutex<Vec<ClientEntry>>>;
+pub type Clients = Arc<Mutex<ServerState>>;
 
 pub fn run_server() -> Result<(), AppError> {
     let bind_addr = config::server_bind_addr();
     let listener = TcpListener::bind(&bind_addr)?;
-    let clients: Clients = Arc::new(Mutex::new(Vec::new()));
+    let clients: Clients = Arc::new(Mutex::new(ServerState {
+        clients: Vec::new(),
+        history: Vec::new(),
+    }));
 
     for stream in listener.incoming() {
         let stream = match stream {
@@ -49,8 +57,8 @@ pub fn run_server() -> Result<(), AppError> {
 }
 
 fn register_client(clients: &Clients, stream: &TcpStream) -> Result<(), AppError> {
-    let mut clients = clients.lock().map_err(|_| AppError::ClientStatePoisoned)?;
-    clients.push(ClientEntry {
+    let mut state = clients.lock().map_err(|_| AppError::ClientStatePoisoned)?;
+    state.clients.push(ClientEntry {
         addr: stream.peer_addr()?,
         stream: stream.try_clone()?,
         username: None,

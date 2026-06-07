@@ -1,5 +1,5 @@
 use std::{
-    io::{ErrorKind, Read},
+    io::{ErrorKind, Read, Write},
     net::TcpStream,
     thread,
 };
@@ -9,7 +9,10 @@ use crate::{
     error::AppError,
     server::{
         Clients,
-        broadcast::{broadcast, broadcast_presence, remove_client, set_client_username},
+        broadcast::{
+            broadcast, broadcast_presence, message_history, record_message, remove_client,
+            set_client_username,
+        },
     },
 };
 
@@ -32,11 +35,13 @@ pub fn handle_connection(mut stream: TcpStream, clients: Clients) -> Result<(), 
     }
 
     set_client_username(&clients, sender_addr, &username)?;
+    send_message_history(&mut stream, &clients)?;
     broadcast_presence(&clients)?;
 
     let join_msg = format!("{} has entered the chat. Say hello!\n", username);
     println!("{}", join_msg.trim());
 
+    record_message(&clients, &join_msg)?;
     broadcast(&clients, &join_msg, None)?;
 
     loop {
@@ -68,6 +73,7 @@ pub fn handle_connection(mut stream: TcpStream, clients: Clients) -> Result<(), 
             thread::sleep(simulated_latency);
         }
 
+        record_message(&clients, &msg)?;
         broadcast(&clients, &msg, None)?;
     }
 }
@@ -81,8 +87,24 @@ fn disconnect_client(
 
     let leave_msg = format!("{} has left the chat\n", username);
     println!("{}", leave_msg.trim());
+    record_message(clients, &leave_msg)?;
     broadcast(clients, &leave_msg, None)?;
     broadcast_presence(clients)?;
+
+    Ok(())
+}
+
+fn send_message_history(stream: &mut TcpStream, clients: &Clients) -> Result<(), AppError> {
+    let history = message_history(clients)?;
+
+    if history.is_empty() {
+        return Ok(());
+    }
+
+    for message in history {
+        stream.write_all(message.as_bytes())?;
+        stream.write_all(b"\n")?;
+    }
 
     Ok(())
 }
