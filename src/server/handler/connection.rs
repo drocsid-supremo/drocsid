@@ -1,41 +1,75 @@
-use std::io::Read;
-use std::{
-    net::TcpStream,
-    sync::{Arc, Mutex},
+use std::io::{ErrorKind, Read};
+use std::net::TcpStream;
+
+use crate::{
+    error::AppError,
+    server::{
+        Clients,
+        broadcast::{broadcast, remove_client},
+    },
 };
 
-use crate::server::broadcast::broadcast;
-
-pub fn handle_connection(mut stream: TcpStream, clients: Arc<Mutex<Vec<TcpStream>>>) {
+pub fn handle_connection(mut stream: TcpStream, clients: Clients) -> Result<(), AppError> {
     let mut buffer = [0; 1024];
-    let sender_addr = stream.peer_addr().unwrap();
+    let sender_addr = stream.peer_addr()?;
 
-    let bytes = stream.read(&mut buffer).unwrap();
+    let bytes = stream.read(&mut buffer)?;
 
     if bytes == 0 {
-        return;
+        remove_client(&clients, sender_addr)?;
+        return Ok(());
     }
 
     let username = String::from_utf8_lossy(&buffer[..bytes]).trim().to_string();
+    if username.is_empty() {
+        remove_client(&clients, sender_addr)?;
+        return Err(AppError::EmptyHandshakeUsername);
+    }
+
     let join_msg = format!("{} has entered the chat. Say hello!\n", username);
     println!("{}", join_msg.trim());
 
-    broadcast(&clients, &join_msg, None);
+    broadcast(&clients, &join_msg, None)?;
 
     loop {
-        let bytes = stream.read(&mut buffer).unwrap();
+        let bytes = match stream.read(&mut buffer) {
+            Ok(bytes) => bytes,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::BrokenPipe
+                        | ErrorKind::ConnectionAborted
+                        | ErrorKind::ConnectionReset
+                ) =>
+            {
+                disconnect_client(&clients, sender_addr, &username)?;
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
 
         if bytes == 0 {
-            let leave_msg = format!("{} has left the chat\n", username);
-
-            println!("{}", leave_msg.trim());
-            broadcast(&clients, &leave_msg, None);
-            break;
+            disconnect_client(&clients, sender_addr, &username)?;
+            return Ok(());
         }
 
         let msg = String::from_utf8_lossy(&buffer[..bytes]);
         print!("{}", msg);
 
-        broadcast(&clients, &msg, Some(sender_addr));
+        broadcast(&clients, &msg, Some(sender_addr))?;
     }
+}
+
+fn disconnect_client(
+    clients: &Clients,
+    sender_addr: std::net::SocketAddr,
+    username: &str,
+) -> Result<(), AppError> {
+    remove_client(clients, sender_addr)?;
+
+    let leave_msg = format!("{} has left the chat\n", username);
+    println!("{}", leave_msg.trim());
+    broadcast(clients, &leave_msg, None)?;
+
+    Ok(())
 }

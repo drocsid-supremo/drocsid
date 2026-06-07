@@ -1,16 +1,37 @@
-pub fn peek_process_ctx(args: &[String]) -> (&str, &str) {
-    let mut mode = "";
-    let mut username = "";
+use crate::error::AppError;
+
+pub enum Command {
+    Server,
+    Client { username: String },
+}
+
+pub fn parse_command(args: &[String]) -> Result<Command, AppError> {
+    let mut mode = None;
+    let mut username = None;
 
     for arg in args {
         if let Some(value) = arg.strip_prefix("mode=") {
-            mode = value;
+            mode = Some(value);
         }
 
         if let Some(value) = arg.strip_prefix("username=") {
-            username = value;
+            username = Some(value);
         }
     }
 
-    (mode, username)
+    let mode = mode.ok_or(AppError::MissingMode)?;
+
+    match mode {
+        "server" => Ok(Command::Server),
+        "client" => {
+            let username = username
+                .filter(|value| !value.trim().is_empty())
+                .ok_or(AppError::MissingUsername)?;
+
+            Ok(Command::Client {
+                username: username.to_string(),
+            })
+        }
+        other => Err(AppError::InvalidMode(other.to_string())),
+    }
 }

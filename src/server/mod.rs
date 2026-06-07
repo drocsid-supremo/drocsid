@@ -1,5 +1,6 @@
 pub mod broadcast;
 pub mod handler;
+use crate::error::AppError;
 use crate::server::handler::connection::handle_connection;
 
 use std::{
@@ -8,19 +9,40 @@ use std::{
     thread,
 };
 
-pub fn run_server() {
-    let listener = TcpListener::bind("0.0.0.0:7878").unwrap();
+pub type Clients = Arc<Mutex<Vec<TcpStream>>>;
 
-    let clients: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
+pub fn run_server() -> Result<(), AppError> {
+    let listener = TcpListener::bind("0.0.0.0:7878")?;
+    let clients: Clients = Arc::new(Mutex::new(Vec::new()));
 
     for stream in listener.incoming() {
-        let stream = stream.unwrap();
-        clients.lock().unwrap().push(stream.try_clone().unwrap());
+        let stream = match stream {
+            Ok(stream) => stream,
+            Err(error) => {
+                eprintln!("failed to accept incoming connection: {error}");
+                continue;
+            }
+        };
+
+        if let Err(error) = register_client(&clients, &stream) {
+            eprintln!("failed to register client: {error}");
+            continue;
+        }
 
         let clients_clone = Arc::clone(&clients);
 
         thread::spawn(move || {
-            handle_connection(stream, clients_clone);
+            if let Err(error) = handle_connection(stream, clients_clone) {
+                eprintln!("connection handler failed: {error}");
+            }
         });
     }
+
+    Ok(())
+}
+
+fn register_client(clients: &Clients, stream: &TcpStream) -> Result<(), AppError> {
+    let mut clients = clients.lock().map_err(|_| AppError::ClientStatePoisoned)?;
+    clients.push(stream.try_clone()?);
+    Ok(())
 }
