@@ -15,7 +15,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
-use crate::error::AppError;
+use crate::{config, error::AppError};
 
 enum NetworkEvent {
     Message(String),
@@ -33,11 +33,13 @@ struct ChatApp {
 
 impl ChatApp {
     fn new(username: &str) -> Self {
+        let server_addr = config::server_connect_addr();
+
         Self {
             username: username.to_string(),
             input: String::new(),
             messages: vec![
-                "Connected to 127.0.0.1:7878".to_string(),
+                format!("Connected to {server_addr}"),
                 "Type a message and press Enter.".to_string(),
             ],
             status: "online".to_string(),
@@ -61,7 +63,8 @@ pub fn run_client(username: &str) -> Result<(), AppError> {
         return Err(AppError::MissingUsername);
     }
 
-    let mut stream = TcpStream::connect("127.0.0.1:7878")?;
+    let server_addr = config::server_connect_addr();
+    let mut stream = TcpStream::connect(&server_addr)?;
     let reader_stream = stream.try_clone()?;
 
     let join_msg = format!("{username}\n");

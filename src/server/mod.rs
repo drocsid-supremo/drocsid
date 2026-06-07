@@ -1,7 +1,7 @@
 pub mod broadcast;
 pub mod handler;
-use crate::error::AppError;
 use crate::server::handler::connection::handle_connection;
+use crate::{config, error::AppError};
 
 use std::{
     net::{TcpListener, TcpStream},
@@ -12,7 +12,8 @@ use std::{
 pub type Clients = Arc<Mutex<Vec<TcpStream>>>;
 
 pub fn run_server() -> Result<(), AppError> {
-    let listener = TcpListener::bind("0.0.0.0:7878")?;
+    let bind_addr = config::server_bind_addr();
+    let listener = TcpListener::bind(&bind_addr)?;
     let clients: Clients = Arc::new(Mutex::new(Vec::new()));
 
     for stream in listener.incoming() {

@@ -1,6 +1,7 @@
 use std::{env, process::ExitCode};
 
 mod client;
+mod config;
 mod error;
 mod peek_process;
 mod server;
@@ -24,6 +25,8 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), AppError> {
+    config::load_env();
+
     let args: Vec<String> = env::args().collect();
     let command = parse_command(&args)?;
 
