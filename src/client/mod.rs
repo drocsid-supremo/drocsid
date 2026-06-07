@@ -371,11 +371,6 @@ fn sidebar_text(app: &ChatApp) -> Text<'static> {
             "Messages: ".into(),
             app.messages.len().to_string().yellow(),
         ]),
-        Line::from(""),
-        Line::from("Notes"),
-        Line::from("- gray means pending ack"),
-        Line::from("- color normalizes on echo"),
-        Line::from("- offline mode blocks sends"),
     ])
 }
 
