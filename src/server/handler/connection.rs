@@ -38,7 +38,7 @@ pub fn handle_connection(mut stream: TcpStream, clients: Clients) -> Result<(), 
     send_message_history(&mut stream, &clients)?;
     broadcast_presence(&clients)?;
 
-    let join_msg = format!("{} has entered the chat. Say hello!\n", username);
+    let join_msg = format!("@{} has entered the chat. Say hello!\n", username);
     println!("{}", join_msg.trim());
 
     record_message(&clients, &join_msg)?;

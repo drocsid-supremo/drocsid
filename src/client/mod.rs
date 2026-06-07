@@ -426,6 +426,11 @@ fn chat_line(message: &ChatMessage, current_username: &str) -> Line<'static> {
     } else {
         Style::new()
     };
+    let fallback_style = if message_mentions_user(&message.text, current_username) {
+        fallback_style.fg(Color::Black).bg(PASTEL_YELLOW)
+    } else {
+        fallback_style
+    };
 
     Line::from(vec![Span::styled(message.text.clone(), fallback_style)])
 }
