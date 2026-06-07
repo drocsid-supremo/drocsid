@@ -67,7 +67,6 @@ pub fn handle_connection(mut stream: TcpStream, clients: Clients) -> Result<(), 
         }
 
         let msg = String::from_utf8_lossy(&buffer[..bytes]);
-        print!("{}", msg);
 
         if !simulated_latency.is_zero() {
             thread::sleep(simulated_latency);
