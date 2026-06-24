@@ -4,11 +4,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error("missing mode argument, expected `mode=server`, `mode=client`, or `mode=tui`")]
+    #[error("missing mode argument, expected `mode=server` or `mode=client`")]
     MissingMode,
     #[error("missing username argument, expected `username=<name>`")]
     MissingUsername,
-    #[error("invalid mode `{0}`, expected `server`, `client`, or `tui`")]
+    #[error("invalid mode `{0}`, expected `server` or `client`")]
     InvalidMode(String),
     #[error("received an empty username during client handshake")]
     EmptyHandshakeUsername,

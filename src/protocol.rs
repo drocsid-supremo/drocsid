@@ -53,3 +53,61 @@ pub fn message_mentions_user(text: &str, username: &str) -> bool {
 
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        USERS_EVENT_PREFIX, build_users_event, format_chat_message, message_mentions_user,
+        parse_chat_message, parse_users_event,
+    };
+
+    #[test]
+    fn formats_and_parses_chat_message() {
+        let message = format_chat_message("alice", "12:34", "hello");
+        let parsed = parse_chat_message(&message).unwrap();
+
+        assert_eq!(message, "[alice](12:34): hello");
+        assert_eq!(parsed, ("alice", "12:34", "hello"));
+    }
+
+    #[test]
+    fn rejects_invalid_chat_message_shape() {
+        assert_eq!(parse_chat_message("alice(12:34): hello"), None);
+        assert_eq!(parse_chat_message("[alice](12:34 hello"), None);
+        assert_eq!(parse_chat_message("[alice] 12:34: hello"), None);
+    }
+
+    #[test]
+    fn builds_and_parses_users_event() {
+        let users = vec!["alice".to_string(), "bob".to_string()];
+        let event = build_users_event(&users);
+
+        assert_eq!(event, format!("{USERS_EVENT_PREFIX}alice,bob\n"));
+        assert_eq!(parse_users_event(&event), Some(users));
+    }
+
+    #[test]
+    fn parses_empty_users_event() {
+        assert_eq!(parse_users_event(USERS_EVENT_PREFIX), Some(Vec::new()));
+    }
+
+    #[test]
+    fn ignores_blank_users_when_parsing_event() {
+        let parsed = parse_users_event("__users__: alice, , bob ,,").unwrap();
+
+        assert_eq!(parsed, vec!["alice".to_string(), "bob".to_string()]);
+    }
+
+    #[test]
+    fn detects_mentions_with_word_boundary() {
+        assert!(message_mentions_user("hello @alice", "alice"));
+        assert!(message_mentions_user("@alice, are you there?", "alice"));
+    }
+
+    #[test]
+    fn rejects_partial_mentions() {
+        assert!(!message_mentions_user("hello @alice1", "alice"));
+        assert!(!message_mentions_user("hello @alice_name", "alice"));
+        assert!(!message_mentions_user("hello alice", "alice"));
+    }
+}

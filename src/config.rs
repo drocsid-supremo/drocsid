@@ -23,7 +23,9 @@ impl AppConfig {
             server: ServerConfig {
                 bind_addr: read_env("SERVER_BIND_ADDR", DEFAULT_SERVER_BIND_ADDR),
                 connect_addr: read_env("SERVER_CONNECT_ADDR", DEFAULT_SERVER_CONNECT_ADDR),
-                simulated_latency: Duration::from_millis(read_latency_ms()),
+                simulated_latency: Duration::from_millis(read_latency_ms_from_var(
+                    env::var("SERVER_SIMULATED_LATENCY_MS").ok().as_deref(),
+                )),
             },
         }
     }
@@ -33,9 +35,52 @@ fn read_env(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-fn read_latency_ms() -> u64 {
-    env::var("SERVER_SIMULATED_LATENCY_MS")
-        .ok()
+fn read_latency_ms_from_var(value: Option<&str>) -> u64 {
+    value
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(DEFAULT_SERVER_SIMULATED_LATENCY_MS)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{
+        DEFAULT_SERVER_BIND_ADDR, DEFAULT_SERVER_CONNECT_ADDR, DEFAULT_SERVER_SIMULATED_LATENCY_MS,
+        ServerConfig, read_latency_ms_from_var,
+    };
+
+    #[test]
+    fn uses_default_latency_when_env_var_is_missing() {
+        assert_eq!(
+            read_latency_ms_from_var(None),
+            DEFAULT_SERVER_SIMULATED_LATENCY_MS
+        );
+    }
+
+    #[test]
+    fn uses_default_latency_when_env_var_is_invalid() {
+        assert_eq!(
+            read_latency_ms_from_var(Some("invalid")),
+            DEFAULT_SERVER_SIMULATED_LATENCY_MS
+        );
+    }
+
+    #[test]
+    fn parses_latency_from_env_var() {
+        assert_eq!(read_latency_ms_from_var(Some("250")), 250);
+    }
+
+    #[test]
+    fn default_server_config_values_are_stable() {
+        let config = ServerConfig {
+            bind_addr: DEFAULT_SERVER_BIND_ADDR.to_string(),
+            connect_addr: DEFAULT_SERVER_CONNECT_ADDR.to_string(),
+            simulated_latency: Duration::from_millis(DEFAULT_SERVER_SIMULATED_LATENCY_MS),
+        };
+
+        assert_eq!(config.bind_addr, "0.0.0.0:7878");
+        assert_eq!(config.connect_addr, "127.0.0.1:7878");
+        assert_eq!(config.simulated_latency, Duration::from_millis(0));
+    }
 }

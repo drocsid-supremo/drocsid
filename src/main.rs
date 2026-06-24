@@ -6,7 +6,6 @@ mod config;
 mod error;
 mod protocol;
 mod server;
-mod tui;
 
 use crate::{
     cli::{Command, parse_command},
@@ -14,7 +13,6 @@ use crate::{
     config::AppConfig,
     error::AppError,
     server::run_server,
-    tui::run_tui,
 };
 
 fn main() -> ExitCode {
@@ -33,6 +31,5 @@ fn run() -> Result<(), AppError> {
     match command {
         Command::Server => run_server(&config.server),
         Command::Client { username } => run_client(&username, &config.server),
-        Command::Tui => run_tui(),
     }
 }
