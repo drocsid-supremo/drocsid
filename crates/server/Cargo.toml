@@ -1,0 +1,9 @@
+[package]
+name = "drocsid-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+drocsid-config = { path = "../config" }
+drocsid-protocol = { path = "../protocol" }
+thiserror = "2"

@@ -1,4 +1,14 @@
-use crate::error::AppError;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum CliError {
+    #[error("missing mode argument, expected `mode=server` or `mode=client`")]
+    MissingMode,
+    #[error("missing username argument, expected `username=<name>`")]
+    MissingUsername,
+    #[error("invalid mode `{0}`, expected `server` or `client`")]
+    InvalidMode(String),
+}
 
 #[derive(Debug)]
 pub enum Command {
@@ -6,7 +16,7 @@ pub enum Command {
     Client { username: String },
 }
 
-pub fn parse_command(args: impl IntoIterator<Item = String>) -> Result<Command, AppError> {
+pub fn parse_command(args: impl IntoIterator<Item = String>) -> Result<Command, CliError> {
     let mut mode = None;
     let mut username = None;
 
@@ -20,23 +30,23 @@ pub fn parse_command(args: impl IntoIterator<Item = String>) -> Result<Command, 
         }
     }
 
-    match mode.as_deref().ok_or(AppError::MissingMode)? {
+    match mode.as_deref().ok_or(CliError::MissingMode)? {
         "server" => Ok(Command::Server),
         "client" => {
             let username = username
                 .filter(|value| !value.trim().is_empty())
-                .ok_or(AppError::MissingUsername)?;
+                .ok_or(CliError::MissingUsername)?;
 
             Ok(Command::Client { username })
         }
-        other => Err(AppError::InvalidMode(other.to_string())),
+        other => Err(CliError::InvalidMode(other.to_string())),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::CliError;
     use super::{Command, parse_command};
-    use crate::error::AppError;
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
@@ -63,27 +73,27 @@ mod tests {
     fn rejects_missing_mode() {
         let error = parse_command(args(&["bin", "username=alice"])).unwrap_err();
 
-        assert!(matches!(error, AppError::MissingMode));
+        assert!(matches!(error, CliError::MissingMode));
     }
 
     #[test]
     fn rejects_missing_username_for_client_mode() {
         let error = parse_command(args(&["bin", "mode=client"])).unwrap_err();
 
-        assert!(matches!(error, AppError::MissingUsername));
+        assert!(matches!(error, CliError::MissingUsername));
     }
 
     #[test]
     fn rejects_blank_username_for_client_mode() {
         let error = parse_command(args(&["bin", "mode=client", "username=   "])).unwrap_err();
 
-        assert!(matches!(error, AppError::MissingUsername));
+        assert!(matches!(error, CliError::MissingUsername));
     }
 
     #[test]
     fn rejects_invalid_mode() {
         let error = parse_command(args(&["bin", "mode=invalid"])).unwrap_err();
 
-        assert!(matches!(error, AppError::InvalidMode(mode) if mode == "invalid"));
+        assert!(matches!(error, CliError::InvalidMode(mode) if mode == "invalid"));
     }
 }

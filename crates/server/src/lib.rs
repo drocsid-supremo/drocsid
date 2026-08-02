@@ -3,12 +3,23 @@ mod state;
 
 use std::{net::TcpListener, sync::Arc, thread};
 
+use drocsid_config::ServerConfig;
+use thiserror::Error;
+
 use connection::ConnectionHandler;
 use state::{new_shared_state, register_client};
 
-use crate::{config::ServerConfig, error::AppError};
+#[derive(Debug, Error)]
+pub enum ServerError {
+    #[error("received an empty username during client handshake")]
+    EmptyHandshakeUsername,
+    #[error("shared client state is poisoned")]
+    ClientStatePoisoned,
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+}
 
-pub fn run_server(server_config: &ServerConfig) -> Result<(), AppError> {
+pub fn run_server(server_config: &ServerConfig) -> Result<(), ServerError> {
     let listener = TcpListener::bind(&server_config.bind_addr)?;
     let state = new_shared_state();
 

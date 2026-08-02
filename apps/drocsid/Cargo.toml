@@ -1,0 +1,21 @@
+[package]
+name = "drocsid"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dotenvy = "0.15"
+drocsid-cli = { path = "../../crates/cli" }
+drocsid-config = { path = "../../crates/config" }
+drocsid-server = { path = "../../crates/server" }
+drocsid-tui = { path = "../../crates/tui" }
+
+[dev-dependencies.cargo-husky]
+version = "1"
+default-features = false
+features = [
+    "precommit-hook",
+    "run-cargo-fmt",
+    "run-cargo-clippy",
+    "run-cargo-test",
+]

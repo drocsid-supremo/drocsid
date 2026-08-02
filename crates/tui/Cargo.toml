@@ -1,0 +1,12 @@
+[package]
+name = "drocsid-tui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = "0.4"
+crossterm = "0.29"
+drocsid-client = { path = "../client" }
+drocsid-config = { path = "../config" }
+drocsid-protocol = { path = "../protocol" }
+ratatui = "0.30.1"

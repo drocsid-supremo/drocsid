@@ -1,21 +1,11 @@
-[package]
-name = "discord"
-version = "0.1.0"
-edition = "2024"
-
-[dev-dependencies.cargo-husky]
-version = "1"
-default-features = false
-features = [
-    "precommit-hook",
-    "run-cargo-fmt",
-    "run-cargo-clippy",
-    "run-cargo-test",
+[workspace]
+members = [
+    "apps/drocsid",
+    "crates/cli",
+    "crates/client",
+    "crates/config",
+    "crates/protocol",
+    "crates/server",
+    "crates/tui",
 ]
-
-[dependencies]
-chrono = "0.4"
-crossterm = "0.29"
-dotenvy = "0.15"
-ratatui = "0.30.1"
-thiserror = "2"
+resolver = "3"

@@ -34,13 +34,13 @@ Clone the repository and enter the project directory:
 
 ```bash
 git clone <repository-url>
-cd discord
+cd drocsid
 ```
 
 Build the application:
 
 ```bash
-cargo build
+cargo build -p drocsid
 ```
 
 ### Start the server
@@ -48,7 +48,7 @@ cargo build
 In one terminal, run:
 
 ```bash
-cargo run -- mode=server
+cargo run -p drocsid -- mode=server
 ```
 
 The server listens on `0.0.0.0:7878` by default.
@@ -58,13 +58,13 @@ The server listens on `0.0.0.0:7878` by default.
 In another terminal, run:
 
 ```bash
-cargo run -- mode=client username=alice
+cargo run -p drocsid -- mode=client username=alice
 ```
 
 Open additional terminals and connect more users by changing the username:
 
 ```bash
-cargo run -- mode=client username=bob
+cargo run -p drocsid -- mode=client username=bob
 ```
 
 The client connects to `127.0.0.1:7878` by default.
@@ -102,10 +102,10 @@ Examples:
 
 ```bash
 # Server
-cargo run -- mode=server
+cargo run -p drocsid -- mode=server
 
 # Client
-cargo run -- mode=client username=alice
+cargo run -p drocsid -- mode=client username=alice
 ```
 
 An unknown mode or a client without a non-empty username causes the application to exit with an error.
@@ -167,11 +167,15 @@ These checks are also executed by the GitHub Actions workflow in `.github/workfl
 
 ## Architecture
 
-The application is organized into three main areas:
+The application is organized as a Cargo workspace with focused crates:
 
-- `src/server`: accepts TCP connections, tracks clients, broadcasts messages, and keeps in-memory history.
-- `src/client`: manages the TCP connection and renders the interactive Ratatui interface.
-- `src/protocol.rs`: contains the text protocol helpers for chat messages, user-presence events, and mentions.
+- `apps/drocsid`: composes the application and provides the executable.
+- `crates/cli`: parses startup arguments and commands.
+- `crates/config`: owns shared server connection configuration.
+- `crates/server`: accepts TCP connections, tracks clients, broadcasts messages, and keeps in-memory history.
+- `crates/client`: manages the TCP connection and client application state.
+- `crates/tui`: renders the interactive Ratatui interface and handles terminal input.
+- `crates/protocol`: contains the text protocol helpers for chat messages, user-presence events, and mentions.
 
 The server and client communicate over a plain TCP stream. Chat messages and presence events are newline-delimited.
 

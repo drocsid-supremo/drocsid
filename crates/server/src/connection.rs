@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use crate::error::AppError;
+use crate::ServerError;
 
 use super::state::{
     ServerStateHandle, broadcast, broadcast_presence, message_history, record_message,
@@ -25,7 +25,7 @@ impl ConnectionHandler {
         }
     }
 
-    pub fn serve(&self, mut stream: TcpStream) -> Result<(), AppError> {
+    pub fn serve(&self, mut stream: TcpStream) -> Result<(), ServerError> {
         let sender_addr = stream.peer_addr()?;
         let username = self.read_handshake_username(&mut stream, sender_addr)?;
 
@@ -45,19 +45,19 @@ impl ConnectionHandler {
         &self,
         stream: &mut TcpStream,
         sender_addr: SocketAddr,
-    ) -> Result<String, AppError> {
+    ) -> Result<String, ServerError> {
         let mut buffer = [0; 1024];
         let bytes = stream.read(&mut buffer)?;
 
         if bytes == 0 {
             remove_client(&self.state, sender_addr)?;
-            return Err(AppError::EmptyHandshakeUsername);
+            return Err(ServerError::EmptyHandshakeUsername);
         }
 
         let username = String::from_utf8_lossy(&buffer[..bytes]).trim().to_string();
         if username.is_empty() {
             remove_client(&self.state, sender_addr)?;
-            return Err(AppError::EmptyHandshakeUsername);
+            return Err(ServerError::EmptyHandshakeUsername);
         }
 
         Ok(username)
@@ -68,7 +68,7 @@ impl ConnectionHandler {
         mut stream: TcpStream,
         sender_addr: SocketAddr,
         username: &str,
-    ) -> Result<(), AppError> {
+    ) -> Result<(), ServerError> {
         let mut buffer = [0; 1024];
 
         loop {
@@ -97,7 +97,11 @@ impl ConnectionHandler {
         }
     }
 
-    fn disconnect_client(&self, sender_addr: SocketAddr, username: &str) -> Result<(), AppError> {
+    fn disconnect_client(
+        &self,
+        sender_addr: SocketAddr,
+        username: &str,
+    ) -> Result<(), ServerError> {
         remove_client(&self.state, sender_addr)?;
 
         let leave_message = format!("{username} has left the chat\n");
@@ -109,7 +113,7 @@ impl ConnectionHandler {
         Ok(())
     }
 
-    fn send_message_history(&self, stream: &mut TcpStream) -> Result<(), AppError> {
+    fn send_message_history(&self, stream: &mut TcpStream) -> Result<(), ServerError> {
         for message in message_history(&self.state)? {
             stream.write_all(message.as_bytes())?;
             stream.write_all(b"\n")?;
