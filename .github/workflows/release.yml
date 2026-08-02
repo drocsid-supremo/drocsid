@@ -53,7 +53,7 @@ jobs:
             archive_extension: zip
 
           - name: macOS x64
-            runner: macos-13
+            runner: macos-15-intel
             target: x86_64-apple-darwin
             platform: macos
             architecture: x86_64
