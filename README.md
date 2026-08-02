@@ -69,6 +69,25 @@ cargo run -- mode=client username=bob
 
 The client connects to `127.0.0.1:7878` by default.
 
+### Termux / Android
+
+Each tagged GitHub Release includes an Android ARM64 archive for Termux:
+
+```text
+drocsid-vX.Y.Z-android-arm64.tar.gz
+```
+
+On an ARM64 Android device with Termux, download the archive from the project's GitHub Release and run:
+
+```bash
+pkg install tar
+tar -xzf drocsid-vX.Y.Z-android-arm64.tar.gz
+chmod +x drocsid
+./drocsid mode=client username=alice
+```
+
+The Android artifact targets `aarch64-linux-android`, so it is built against the Android runtime rather than the standard Linux runtime. Termux ARM64 is supported by the release artifact; other Android architectures are not currently published.
+
 ## Command-line arguments
 
 The application uses `key=value` arguments:
