@@ -187,4 +187,4 @@ This project is currently experimental. In particular:
 
 ## License
 
-No license file is currently included in this repository. Add an explicit license before distributing the project publicly.
+This project is licensed under the [MIT License](LICENSE).
