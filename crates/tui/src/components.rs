@@ -6,10 +6,8 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
-use crate::{
-    client::app::{ChatApp, ChatMessage, MessageState},
-    protocol::parse_chat_message,
-};
+use drocsid_client::app::{ChatApp, ChatMessage, MessageState};
+use drocsid_protocol::parse_chat_message;
 
 use super::{
     layout::centered_rect,

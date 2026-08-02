@@ -5,7 +5,8 @@ use std::{
     thread,
 };
 
-use crate::{config::ServerConfig, error::AppError, protocol::parse_users_event};
+use drocsid_config::ServerConfig;
+use drocsid_protocol::parse_users_event;
 
 pub enum NetworkEvent {
     Message(String),
@@ -21,7 +22,7 @@ impl ClientConnection {
     pub fn connect(
         username: &str,
         server_config: &ServerConfig,
-    ) -> Result<(Self, Receiver<NetworkEvent>), AppError> {
+    ) -> std::io::Result<(Self, Receiver<NetworkEvent>)> {
         let mut stream = TcpStream::connect(&server_config.connect_addr)?;
         let reader_stream = stream.try_clone()?;
 

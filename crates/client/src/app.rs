@@ -1,4 +1,4 @@
-use crate::protocol::message_mentions_user;
+use drocsid_protocol::message_mentions_user;
 
 const MESSAGE_LIMIT: usize = 300;
 

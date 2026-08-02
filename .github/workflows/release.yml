@@ -118,7 +118,7 @@ jobs:
       - name: Build release binary
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --locked --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --package drocsid --target ${{ matrix.target }}
 
       - name: Package release archive
         shell: bash
@@ -134,7 +134,7 @@ jobs:
 
           archive_name="${BINARY_NAME}-${VERSION}-${PLATFORM}-${ARCHITECTURE}"
           staging_directory="${RUNNER_TEMP}/${archive_name}"
-          binary_path="target/${TARGET}/release/discord${BINARY_EXTENSION}"
+          binary_path="target/${TARGET}/release/drocsid${BINARY_EXTENSION}"
           packaged_binary="${staging_directory}/${BINARY_NAME}${BINARY_EXTENSION}"
 
           mkdir -p "${staging_directory}"

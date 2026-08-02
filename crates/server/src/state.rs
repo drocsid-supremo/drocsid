@@ -4,7 +4,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::{error::AppError, protocol::build_users_event};
+use crate::ServerError;
+use drocsid_protocol::build_users_event;
 
 const MESSAGE_HISTORY_LIMIT: usize = 100;
 
@@ -34,8 +35,8 @@ pub fn new_shared_state() -> ServerStateHandle {
     Arc::new(Mutex::new(ServerState::new()))
 }
 
-pub fn register_client(state: &ServerStateHandle, stream: &TcpStream) -> Result<(), AppError> {
-    let mut state = state.lock().map_err(|_| AppError::ClientStatePoisoned)?;
+pub fn register_client(state: &ServerStateHandle, stream: &TcpStream) -> Result<(), ServerError> {
+    let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
     state.clients.push(ClientEntry {
         addr: stream.peer_addr()?,
         stream: stream.try_clone()?,
@@ -44,8 +45,11 @@ pub fn register_client(state: &ServerStateHandle, stream: &TcpStream) -> Result<
     Ok(())
 }
 
-pub fn remove_client(state: &ServerStateHandle, target_addr: SocketAddr) -> Result<(), AppError> {
-    let mut state = state.lock().map_err(|_| AppError::ClientStatePoisoned)?;
+pub fn remove_client(
+    state: &ServerStateHandle,
+    target_addr: SocketAddr,
+) -> Result<(), ServerError> {
+    let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
     state.clients.retain(|client| client.addr != target_addr);
     Ok(())
 }
@@ -54,8 +58,8 @@ pub fn set_client_username(
     state: &ServerStateHandle,
     target_addr: SocketAddr,
     username: &str,
-) -> Result<(), AppError> {
-    let mut state = state.lock().map_err(|_| AppError::ClientStatePoisoned)?;
+) -> Result<(), ServerError> {
+    let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
 
     if let Some(client) = state
         .clients
@@ -72,8 +76,8 @@ pub fn broadcast(
     state: &ServerStateHandle,
     message: &str,
     exclude_addr: Option<SocketAddr>,
-) -> Result<(), AppError> {
-    let mut state = state.lock().map_err(|_| AppError::ClientStatePoisoned)?;
+) -> Result<(), ServerError> {
+    let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
     let mut index = 0;
 
     while index < state.clients.len() {
@@ -96,8 +100,8 @@ pub fn broadcast(
     Ok(())
 }
 
-pub fn usernames(state: &ServerStateHandle) -> Result<Vec<String>, AppError> {
-    let state = state.lock().map_err(|_| AppError::ClientStatePoisoned)?;
+pub fn usernames(state: &ServerStateHandle) -> Result<Vec<String>, ServerError> {
+    let state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
     Ok(state
         .clients
         .iter()
@@ -105,18 +109,18 @@ pub fn usernames(state: &ServerStateHandle) -> Result<Vec<String>, AppError> {
         .collect())
 }
 
-pub fn broadcast_presence(state: &ServerStateHandle) -> Result<(), AppError> {
+pub fn broadcast_presence(state: &ServerStateHandle) -> Result<(), ServerError> {
     let users = usernames(state)?;
     broadcast(state, &build_users_event(&users), None)
 }
 
-pub fn message_history(state: &ServerStateHandle) -> Result<Vec<String>, AppError> {
-    let state = state.lock().map_err(|_| AppError::ClientStatePoisoned)?;
+pub fn message_history(state: &ServerStateHandle) -> Result<Vec<String>, ServerError> {
+    let state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
     Ok(state.history.clone())
 }
 
-pub fn record_message(state: &ServerStateHandle, message: &str) -> Result<(), AppError> {
-    let mut state = state.lock().map_err(|_| AppError::ClientStatePoisoned)?;
+pub fn record_message(state: &ServerStateHandle, message: &str) -> Result<(), ServerError> {
+    let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
     state
         .history
         .push(message.trim_end_matches('\n').to_string());

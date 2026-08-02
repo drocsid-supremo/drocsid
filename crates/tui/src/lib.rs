@@ -2,19 +2,60 @@ mod components;
 mod layout;
 mod theme;
 
-use std::time::Duration;
+use std::{
+    io,
+    sync::mpsc::{Receiver, TryRecvError},
+    time::Duration,
+};
 
 use chrono::Local;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use drocsid_client::{
+    app::{ChatApp, MessageState},
+    network::{ClientConnection, NetworkEvent},
+};
+use drocsid_config::ServerConfig;
+use drocsid_protocol::format_chat_message;
 use ratatui::Frame;
 
-use crate::{
-    client::{
-        app::{ChatApp, MessageState},
-        network::ClientConnection,
-    },
-    protocol::format_chat_message,
-};
+pub fn run_client(username: &str, server_config: &ServerConfig) -> io::Result<()> {
+    if username.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "username cannot be empty",
+        ));
+    }
+
+    let (mut connection, rx) = ClientConnection::connect(username, server_config)?;
+    let mut app = ChatApp::new(username, &server_config.connect_addr);
+
+    ratatui::run(|terminal| -> io::Result<()> {
+        while !app.should_quit {
+            drain_network_events(&mut app, &rx);
+            terminal.draw(|frame| render(frame, &app))?;
+            handle_terminal_event(&mut app, &mut connection)?;
+        }
+
+        Ok(())
+    })?;
+
+    if let Some(exit_notice) = app.exit_notice {
+        println!("client closed: {exit_notice}");
+    }
+
+    Ok(())
+}
+
+fn drain_network_events(app: &mut ChatApp, rx: &Receiver<NetworkEvent>) {
+    loop {
+        match rx.try_recv() {
+            Ok(NetworkEvent::Message(message)) => app.receive_message(message),
+            Ok(NetworkEvent::UserList(users)) => app.update_connected_users(users),
+            Ok(NetworkEvent::Disconnected(reason)) => app.begin_shutdown(reason),
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+        }
+    }
+}
 
 pub fn handle_terminal_event(
     app: &mut ChatApp,

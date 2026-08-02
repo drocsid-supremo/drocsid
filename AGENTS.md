@@ -1,0 +1,114 @@
+# Project Architecture Guide
+
+This repository is a Cargo workspace composed of small, focused crates. Keep the workspace modular by responsibility and dependency ownership.
+
+## Workspace layout
+
+```text
+apps/
+└── drocsid/              # Final executable and application composition
+
+crates/
+├── cli/                  # Command-line parsing and command validation
+├── config/               # Shared connection configuration and defaults
+├── protocol/             # Wire-format helpers and protocol rules
+├── client/               # Client networking and client-side chat state
+├── server/               # TCP listener, sessions, broadcast, and history
+└── tui/                  # Ratatui interface and terminal input handling
+```
+
+The executable package is intentionally kept separate from reusable crates. `apps/drocsid` is responsible for composition, environment loading, command dispatch, and process-level error reporting.
+
+## Dependency boundaries
+
+Keep dependencies directed and acyclic:
+
+```text
+protocol
+   ↑
+server       client
+                ↑
+               tui
+
+cli ─────────────┐
+server ──────────┼──> apps/drocsid
+client ──────────┤
+tui ─────────────┘
+```
+
+Rules:
+
+- `drocsid-protocol` must remain platform-independent and should not depend on UI, networking, or application crates.
+- `drocsid-server` may depend on `drocsid-config` and `drocsid-protocol`. It must not depend on `drocsid-client`, `drocsid-tui`, or terminal libraries.
+- `drocsid-client` may depend on `drocsid-config` and `drocsid-protocol`. It must not depend on the server or TUI.
+- `drocsid-tui` owns Ratatui, Crossterm, and other terminal-specific dependencies. It may consume client state and client networking APIs, but the client must not depend on the TUI.
+- `drocsid-cli` owns command parsing and validation. It must not import server, client, or TUI implementation details.
+- `drocsid-config` owns shared configuration data and defaults. Environment-file loading belongs to the application layer.
+- `apps/drocsid` is the composition root. Cross-component orchestration belongs here rather than in a reusable crate.
+- Never introduce circular dependencies. If two crates need the same data, move the stable shared type into `drocsid-protocol` or `drocsid-config` only when that ownership is semantically correct.
+
+## Component design
+
+Treat each crate as a small library with an explicit public API:
+
+- Prefer private implementation modules and expose only types and functions required by consumers.
+- Keep transport concerns separate from presentation concerns.
+- Keep wire-format rules in `drocsid-protocol` instead of duplicating them in the client and server.
+- Keep application composition out of libraries where possible.
+- Add a new crate only when it represents a real responsibility, has a stable boundary, or needs an independent dependency set. Do not split files into crates solely to increase the number of components.
+
+## Dependency policy
+
+Before adding a dependency:
+
+1. Confirm that the dependency belongs to the crate that will use it.
+2. Check whether the standard library or an existing workspace crate is sufficient.
+3. Avoid importing UI, operating-system, or runtime dependencies into protocol and domain-oriented crates.
+4. Keep versions consistent with the workspace lockfile and validate all workspace targets.
+
+Examples:
+
+- `ratatui`, `crossterm`, and terminal rendering helpers belong in `drocsid-tui`.
+- TCP and session state belong in `drocsid-server` or `drocsid-client`.
+- Message encoding, presence events, and mention matching belong in `drocsid-protocol`.
+- `dotenvy` belongs in `apps/drocsid`, where process configuration is loaded.
+
+## Code organization
+
+- Use lowercase crate and directory names with hyphens for package names, following Cargo conventions.
+- Prefer `lib.rs` as the public entry point for workspace crates.
+- Keep tests next to the crate or module they verify.
+- Avoid reaching through another crate's private implementation modules.
+- When moving a responsibility between crates, update the dependency manifest, imports, README architecture section, and relevant tests in the same change.
+
+## Validation
+
+Run the narrowest relevant checks during development. Before merging workspace changes, run:
+
+```bash
+cargo fmt --all -- --check
+cargo check --all-targets
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets
+```
+
+Build the distributable executable explicitly with:
+
+```bash
+cargo build --package drocsid --release
+```
+
+The release workflow must continue to build the `drocsid` package explicitly so adding libraries to the workspace does not change which binary is published.
+
+## Architecture changes
+
+When adding or changing a component:
+
+1. Define its responsibility and public API.
+2. Identify which existing crate owns the data it consumes or produces.
+3. Add only the dependencies required by that component.
+4. Update the workspace members and dependency graph.
+5. Update the architecture documentation.
+6. Run the full workspace validation commands.
+
+Prefer small, reversible boundary changes. A broader refactor requires a concrete dependency or ownership problem that the current structure cannot solve cleanly.

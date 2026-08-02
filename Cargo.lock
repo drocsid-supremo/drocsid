@@ -339,18 +339,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "discord"
-version = "0.1.0"
-dependencies = [
- "cargo-husky",
- "chrono",
- "crossterm",
- "dotenvy",
- "ratatui",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -364,6 +352,62 @@ name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
+
+[[package]]
+name = "drocsid"
+version = "0.1.0"
+dependencies = [
+ "cargo-husky",
+ "dotenvy",
+ "drocsid-cli",
+ "drocsid-config",
+ "drocsid-server",
+ "drocsid-tui",
+]
+
+[[package]]
+name = "drocsid-cli"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "drocsid-client"
+version = "0.1.0"
+dependencies = [
+ "drocsid-config",
+ "drocsid-protocol",
+]
+
+[[package]]
+name = "drocsid-config"
+version = "0.1.0"
+
+[[package]]
+name = "drocsid-protocol"
+version = "0.1.0"
+
+[[package]]
+name = "drocsid-server"
+version = "0.1.0"
+dependencies = [
+ "drocsid-config",
+ "drocsid-protocol",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "drocsid-tui"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "crossterm",
+ "drocsid-client",
+ "drocsid-config",
+ "drocsid-protocol",
+ "ratatui",
+]
 
 [[package]]
 name = "either"
