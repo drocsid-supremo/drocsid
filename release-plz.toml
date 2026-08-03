@@ -1,12 +1,30 @@
 [workspace]
 repo_url = "https://github.com/drocsid-supremo/drocsid"
-changelog_update = true
+changelog_update = false
+pr_body = """
+## Release
+
+{% for release in releases %}
+{% if release.package == "drocsid" %}
+{{ release.changelog }}
+{% endif %}
+{% endfor %}
+"""
 git_tag_enable = false
 git_release_enable = false
 publish_timeout = "10m"
 
 [[package]]
 name = "drocsid"
+changelog_update = true
+changelog_include = [
+  "drocsid-cli",
+  "drocsid-config",
+  "drocsid-protocol",
+  "drocsid-client",
+  "drocsid-server",
+  "drocsid-tui",
+]
 git_tag_enable = true
 git_tag_name = "v{{ version }}"
 git_release_enable = false
