@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::ServerError;
+use tracing::{debug, info, warn};
 
 use super::state::{
     ServerStateHandle, allow_message, broadcast, broadcast_presence, message_history,
@@ -38,14 +39,32 @@ impl ConnectionHandler {
 
         let username = {
             let mut handshake_reader = FrameReader::new(stream.try_clone()?);
-            self.read_handshake_username(&mut handshake_reader, sender_addr)?
+            match self.read_handshake_username(&mut handshake_reader, sender_addr) {
+                Ok(username) => username,
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        error_kind = ?error_kind(&error),
+                        phase = "handshake",
+                        "handshake failed"
+                    );
+                    return Err(error);
+                }
+            }
         };
         stream.set_read_timeout(None)?;
         let mut reader = FrameReader::new(stream.try_clone()?);
+        info!(username = %username, phase = "handshake", "handshake completed");
 
         set_client_username(&self.state, sender_addr, &username)?;
         if let Err(error) = self.send_message_history(&mut stream) {
             remove_client(&self.state, sender_addr)?;
+            warn!(
+                error = %error,
+                error_kind = ?error_kind(&error),
+                phase = "history",
+                "failed to send message history"
+            );
             return match error {
                 ServerError::Io(error) if is_disconnect_error(&error) => Ok(()),
                 error => Err(error),
@@ -54,12 +73,39 @@ impl ConnectionHandler {
         broadcast_presence(&self.state)?;
 
         let join_message = format!("@{} has entered the chat. Say hello!\n", username);
-        println!("{}", join_message.trim());
+        info!(username = %username, phase = "lifecycle", "client joined chat");
         record_message(&self.state, &join_message)?;
-        broadcast(&self.state, &join_message, None)?;
+        if let Err(error) = broadcast(&self.state, &join_message, None) {
+            warn!(
+                error = %error,
+                error_kind = ?error_kind(&error),
+                phase = "broadcast",
+                event = "join",
+                "failed to broadcast join event"
+            );
+            return Err(error);
+        }
 
         let result = self.read_messages(&mut reader, sender_addr);
-        self.disconnect_client(sender_addr, &username)?;
+        if let Err(error) = &result {
+            warn!(
+                error = %error,
+                error_kind = ?error_kind(error),
+                phase = "message_read",
+                "message loop ended with an error"
+            );
+        }
+
+        if let Err(error) = self.disconnect_client(sender_addr, &username) {
+            warn!(
+                error = %error,
+                error_kind = ?error_kind(&error),
+                phase = "disconnect",
+                "failed to disconnect client cleanly"
+            );
+            return Err(error);
+        }
+
         result
     }
 
@@ -113,6 +159,11 @@ impl ConnectionHandler {
                 Err(FrameError::Io(error)) if is_disconnect_error(&error) => return Ok(()),
                 Err(FrameError::Io(error)) => return Err(error.into()),
             };
+            debug!(
+                frame_bytes = bytes.len(),
+                phase = "message_read",
+                "message frame received"
+            );
             let message = String::from_utf8(bytes).map_err(|_| ServerError::InvalidUtf8)?;
 
             if message.trim().is_empty() {
@@ -126,7 +177,15 @@ impl ConnectionHandler {
             }
 
             record_message(&self.state, &message)?;
-            broadcast(&self.state, &format!("{message}\n"), None)?;
+            if let Err(error) = broadcast(&self.state, &format!("{message}\n"), None) {
+                warn!(
+                    error = %error,
+                    error_kind = ?error_kind(&error),
+                    phase = "broadcast",
+                    "failed to broadcast chat message"
+                );
+                return Err(error);
+            }
         }
     }
 
@@ -138,7 +197,7 @@ impl ConnectionHandler {
         remove_client(&self.state, sender_addr)?;
 
         let leave_message = format!("{username} has left the chat\n");
-        println!("{}", leave_message.trim());
+        info!(username = %username, phase = "lifecycle", "client left chat");
         record_message(&self.state, &leave_message)?;
         broadcast(&self.state, &leave_message, None)?;
         broadcast_presence(&self.state)?;
@@ -226,6 +285,13 @@ fn is_disconnect_error(error: &std::io::Error) -> bool {
             | ErrorKind::TimedOut
             | ErrorKind::WouldBlock
     )
+}
+
+fn error_kind(error: &ServerError) -> Option<ErrorKind> {
+    match error {
+        ServerError::Io(error) => Some(error.kind()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

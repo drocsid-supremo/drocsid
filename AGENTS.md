@@ -81,6 +81,18 @@ Examples:
 - Avoid reaching through another crate's private implementation modules.
 - When moving a responsibility between crates, update the dependency manifest, imports, README architecture section, and relevant tests in the same change.
 
+## Observability
+
+Observability is part of the runtime contract, not an optional debugging convenience. Network behavior must be diagnosable from structured logs without reproducing the incident locally.
+
+- Use `tracing` for application and library diagnostics; do not add new `println!` or `eprintln!` calls for operational events.
+- Initialize the subscriber in `apps/drocsid`, the composition root. Keep human-readable logs as the default and support JSON output through `DROCSID_LOG_FORMAT=json`.
+- Respect `RUST_LOG` so operators can increase verbosity for a specific crate or module without recompiling.
+- Include stable context in connection-related events: peer address, username when authenticated, error kind, and the processing phase when known.
+- Log lifecycle and failure events such as connection acceptance, handshake completion, history delivery, frame reads, broadcasts, and disconnects.
+- Do not log message contents, credentials, tokens, or other sensitive payloads by default.
+- When reporting a bug, preserve the exact command, relevant `RUST_LOG` value, and the JSON log lines around the failure.
+
 ## Validation
 
 Run the narrowest relevant checks during development. Before merging workspace changes, run:
