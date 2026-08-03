@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::ServerError;
+use drocsid_protocol::is_valid_username;
 use tracing::{debug, info, warn};
 
 use super::state::{
@@ -54,7 +55,7 @@ impl ConnectionHandler {
         };
         stream.set_read_timeout(None)?;
         let mut reader = FrameReader::new(stream.try_clone()?);
-        info!(username = %username, phase = "handshake", "handshake completed");
+        info!(username = ?username, phase = "handshake", "handshake completed");
 
         set_client_username(&self.state, sender_addr, &username)?;
         if let Err(error) = self.send_message_history(&mut stream) {
@@ -73,7 +74,7 @@ impl ConnectionHandler {
         broadcast_presence(&self.state)?;
 
         let join_message = format!("@{} has entered the chat. Say hello!\n", username);
-        info!(username = %username, phase = "lifecycle", "client joined chat");
+        info!(username = ?username, phase = "lifecycle", "client joined chat");
         record_message(&self.state, &join_message)?;
         if let Err(error) = broadcast(&self.state, &join_message, None) {
             warn!(
@@ -109,9 +110,9 @@ impl ConnectionHandler {
         result
     }
 
-    fn read_handshake_username(
+    fn read_handshake_username<R: Read>(
         &self,
-        reader: &mut FrameReader<TcpStream>,
+        reader: &mut FrameReader<R>,
         sender_addr: SocketAddr,
     ) -> Result<String, ServerError> {
         let username = match reader.read_frame(MAX_USERNAME_BYTES) {
@@ -141,6 +142,11 @@ impl ConnectionHandler {
         if username.is_empty() {
             remove_client(&self.state, sender_addr)?;
             return Err(ServerError::EmptyHandshakeUsername);
+        }
+
+        if !is_valid_username(&username) {
+            remove_client(&self.state, sender_addr)?;
+            return Err(ServerError::UsernameContainsControlCharacters);
         }
 
         Ok(username)
@@ -197,7 +203,7 @@ impl ConnectionHandler {
         remove_client(&self.state, sender_addr)?;
 
         let leave_message = format!("{username} has left the chat\n");
-        info!(username = %username, phase = "lifecycle", "client left chat");
+        info!(username = ?username, phase = "lifecycle", "client left chat");
         record_message(&self.state, &leave_message)?;
         broadcast(&self.state, &leave_message, None)?;
         broadcast_presence(&self.state)?;
@@ -296,9 +302,10 @@ fn error_kind(error: &ServerError) -> Option<ErrorKind> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{io::Cursor, net::SocketAddr, time::Duration};
 
-    use super::{FrameError, FrameReader};
+    use super::{ConnectionHandler, FrameError, FrameReader};
+    use crate::{ServerError, state::new_shared_state};
 
     #[test]
     fn reads_newline_delimited_frames() {
@@ -322,5 +329,17 @@ mod tests {
 
         assert_eq!(reader.read_frame(16).unwrap(), Some(b"hello".to_vec()));
         assert_eq!(reader.read_frame(16).unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_control_characters_during_handshake() {
+        let handler = ConnectionHandler::new(new_shared_state(), Duration::ZERO);
+        let mut reader = FrameReader::new(Cursor::new(b"alice\x1b[2J\n"));
+        let sender_addr: SocketAddr = "127.0.0.1:7878".parse().unwrap();
+
+        assert!(matches!(
+            handler.read_handshake_username(&mut reader, sender_addr),
+            Err(ServerError::UsernameContainsControlCharacters)
+        ));
     }
 }

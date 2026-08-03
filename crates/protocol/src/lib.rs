@@ -1,5 +1,9 @@
 pub const USERS_EVENT_PREFIX: &str = "__users__:";
 
+pub fn is_valid_username(username: &str) -> bool {
+    !username.trim().is_empty() && !username.chars().any(char::is_control)
+}
+
 pub fn format_chat_message(username: &str, timestamp: &str, content: &str) -> String {
     format!("[{username}]({timestamp}): {content}")
 }
@@ -57,8 +61,8 @@ pub fn message_mentions_user(text: &str, username: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        USERS_EVENT_PREFIX, build_users_event, format_chat_message, message_mentions_user,
-        parse_chat_message, parse_users_event,
+        USERS_EVENT_PREFIX, build_users_event, format_chat_message, is_valid_username,
+        message_mentions_user, parse_chat_message, parse_users_event,
     };
 
     #[test]
@@ -109,5 +113,19 @@ mod tests {
         assert!(!message_mentions_user("hello @alice1", "alice"));
         assert!(!message_mentions_user("hello @alice_name", "alice"));
         assert!(!message_mentions_user("hello alice", "alice"));
+    }
+
+    #[test]
+    fn rejects_usernames_with_control_characters() {
+        assert!(!is_valid_username("alice\u{1b}[2J"));
+        assert!(!is_valid_username("alice\nadmin"));
+        assert!(!is_valid_username("alice\radmin"));
+        assert!(!is_valid_username("alice\tadmin"));
+    }
+
+    #[test]
+    fn accepts_usernames_with_printable_characters() {
+        assert!(is_valid_username("alice_42"));
+        assert!(is_valid_username("café"));
     }
 }
