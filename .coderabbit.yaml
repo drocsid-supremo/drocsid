@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en-US"
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  review_status: true
+
+  auto_review:
+    enabled: true
+    drafts: false
+
+  path_instructions:
+    - path: "crates/protocol/**"
+      instructions: |
+        Review wire-format compatibility and boundary validation.
+        Do not suggest dependencies on networking, UI, or application crates.
+
+    - path: "crates/server/**"
+      instructions: |
+        Review authenticated identity, input validation, TCP lifecycle,
+        broadcast behavior, sensitive logging, and security regressions.
+
+    - path: "crates/client/**"
+      instructions: |
+        Review protocol compatibility, frame limits, disconnect handling,
+        and client-side state transitions.
+
+    - path: ".github/workflows/**"
+      instructions: |
+        Review permissions, secrets exposure, action pinning, and whether
+        validation commands match the repository policy.
