@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io::Write,
     net::{IpAddr, SocketAddr, TcpStream},
     sync::{Arc, Mutex},
@@ -20,8 +20,35 @@ pub type ServerStateHandle = Arc<Mutex<ServerState>>;
 
 pub struct ServerState {
     clients: Vec<ClientEntry>,
-    history: Vec<String>,
+    history: MessageHistory,
     rate_limits: HashMap<IpAddr, RateLimitState>,
+}
+
+struct MessageHistory {
+    entries: VecDeque<String>,
+    limit: usize,
+}
+
+impl MessageHistory {
+    fn new(limit: usize) -> Self {
+        Self {
+            entries: VecDeque::with_capacity(limit),
+            limit,
+        }
+    }
+
+    fn record(&mut self, message: &str) {
+        self.entries
+            .push_back(message.trim_end_matches('\n').to_string());
+
+        if self.entries.len() > self.limit {
+            self.entries.pop_front();
+        }
+    }
+
+    fn snapshot(&self) -> Vec<String> {
+        self.entries.iter().cloned().collect()
+    }
 }
 
 struct RateLimitState {
@@ -43,7 +70,7 @@ impl ServerState {
     fn new() -> Self {
         Self {
             clients: Vec::new(),
-            history: Vec::new(),
+            history: MessageHistory::new(MESSAGE_HISTORY_LIMIT),
             rate_limits: HashMap::new(),
         }
     }
@@ -143,7 +170,7 @@ pub(crate) fn history_snapshot(
         .clients
         .iter()
         .find(|client| client.addr == target_addr)
-        .map(|client| (Arc::clone(&client.writer), state.history.clone()))
+        .map(|client| (Arc::clone(&client.writer), state.history.snapshot()))
         .ok_or(ServerError::ClientStatePoisoned)
 }
 
@@ -267,14 +294,7 @@ pub fn broadcast_presence(state: &ServerStateHandle) -> Result<(), ServerError> 
 
 pub fn record_message(state: &ServerStateHandle, message: &str) -> Result<(), ServerError> {
     let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
-    state
-        .history
-        .push(message.trim_end_matches('\n').to_string());
-
-    if state.history.len() > MESSAGE_HISTORY_LIMIT {
-        let overflow = state.history.len() - MESSAGE_HISTORY_LIMIT;
-        state.history.drain(0..overflow);
-    }
+    state.history.record(message);
 
     Ok(())
 }
@@ -289,8 +309,20 @@ mod tests {
     };
 
     use super::{
-        broadcast, history_snapshot, mark_client_ready, new_shared_state, register_pending_client,
+        MessageHistory, broadcast, history_snapshot, mark_client_ready, new_shared_state,
+        register_pending_client,
     };
+
+    #[test]
+    fn message_history_evicts_oldest_entry_without_shifting_retained_entries() {
+        let mut history = MessageHistory::new(2);
+
+        history.record("first\n");
+        history.record("second\n");
+        history.record("third\n");
+
+        assert_eq!(history.snapshot(), ["second", "third"]);
+    }
 
     #[test]
     fn pending_clients_do_not_receive_live_broadcasts_before_history_replay() {
