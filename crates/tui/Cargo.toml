@@ -1,12 +1,15 @@
 [package]
 name = "drocsid-tui"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Ratatui terminal interface for drocsid."
 
 [dependencies]
 chrono = "0.4"
 crossterm = "0.29"
-drocsid-client = { path = "../client" }
-drocsid-config = { path = "../config" }
-drocsid-protocol = { path = "../protocol" }
+drocsid-client = { version = "0.1.0", path = "../client" }
+drocsid-config = { version = "0.1.0", path = "../config" }
+drocsid-protocol = { version = "0.1.0", path = "../protocol" }
 ratatui = "0.30.1"

@@ -1,14 +1,17 @@
 [package]
 name = "drocsid"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A terminal chat client and server written in Rust."
 
 [dependencies]
 dotenvy = "0.15"
-drocsid-cli = { path = "../../crates/cli" }
-drocsid-config = { path = "../../crates/config" }
-drocsid-server = { path = "../../crates/server" }
-drocsid-tui = { path = "../../crates/tui" }
+drocsid-cli = { version = "0.1.0", path = "../../crates/cli" }
+drocsid-config = { version = "0.1.0", path = "../../crates/config" }
+drocsid-server = { version = "0.1.0", path = "../../crates/server" }
+drocsid-tui = { version = "0.1.0", path = "../../crates/tui" }
 
 [dev-dependencies.cargo-husky]
 version = "1"
