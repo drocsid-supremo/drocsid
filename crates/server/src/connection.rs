@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::ServerError;
+use drocsid_protocol::is_valid_username;
 use tracing::{debug, info, warn};
 
 use super::state::{
@@ -54,7 +55,7 @@ impl ConnectionHandler {
         };
         stream.set_read_timeout(None)?;
         let mut reader = FrameReader::new(stream.try_clone()?);
-        info!(username = %username, phase = "handshake", "handshake completed");
+        info!(username = ?username, phase = "handshake", "handshake completed");
 
         set_client_username(&self.state, sender_addr, &username)?;
         if let Err(error) = self.send_message_history(&mut stream) {
@@ -73,7 +74,7 @@ impl ConnectionHandler {
         broadcast_presence(&self.state)?;
 
         let join_message = format!("@{} has entered the chat. Say hello!\n", username);
-        info!(username = %username, phase = "lifecycle", "client joined chat");
+        info!(username = ?username, phase = "lifecycle", "client joined chat");
         record_message(&self.state, &join_message)?;
         if let Err(error) = broadcast(&self.state, &join_message, None) {
             warn!(
@@ -109,12 +110,12 @@ impl ConnectionHandler {
         result
     }
 
-    fn read_handshake_username(
+    fn read_handshake_username<R: Read>(
         &self,
-        reader: &mut FrameReader<TcpStream>,
+        reader: &mut FrameReader<R>,
         sender_addr: SocketAddr,
     ) -> Result<String, ServerError> {
-        let username = match reader.read_frame(MAX_USERNAME_BYTES) {
+        let raw_username = match reader.read_frame(MAX_USERNAME_BYTES) {
             Ok(Some(bytes)) => match String::from_utf8(bytes) {
                 Ok(username) => username,
                 Err(_) => {
@@ -134,16 +135,19 @@ impl ConnectionHandler {
                 let _ = remove_client(&self.state, sender_addr);
                 return Err(error.into());
             }
-        }
-        .trim()
-        .to_string();
+        };
 
-        if username.is_empty() {
+        if raw_username.trim().is_empty() {
             remove_client(&self.state, sender_addr)?;
             return Err(ServerError::EmptyHandshakeUsername);
         }
 
-        Ok(username)
+        if !is_valid_username(&raw_username) {
+            remove_client(&self.state, sender_addr)?;
+            return Err(ServerError::UsernameContainsControlCharacters);
+        }
+
+        Ok(raw_username.trim().to_string())
     }
 
     fn read_messages(
@@ -197,7 +201,7 @@ impl ConnectionHandler {
         remove_client(&self.state, sender_addr)?;
 
         let leave_message = format!("{username} has left the chat\n");
-        info!(username = %username, phase = "lifecycle", "client left chat");
+        info!(username = ?username, phase = "lifecycle", "client left chat");
         record_message(&self.state, &leave_message)?;
         broadcast(&self.state, &leave_message, None)?;
         broadcast_presence(&self.state)?;
@@ -296,9 +300,10 @@ fn error_kind(error: &ServerError) -> Option<ErrorKind> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{io::Cursor, net::SocketAddr, time::Duration};
 
-    use super::{FrameError, FrameReader};
+    use super::{ConnectionHandler, FrameError, FrameReader};
+    use crate::{ServerError, state::new_shared_state};
 
     #[test]
     fn reads_newline_delimited_frames() {
@@ -322,5 +327,24 @@ mod tests {
 
         assert_eq!(reader.read_frame(16).unwrap(), Some(b"hello".to_vec()));
         assert_eq!(reader.read_frame(16).unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_control_characters_during_handshake() {
+        let sender_addr: SocketAddr = "127.0.0.1:7878".parse().unwrap();
+
+        for frame in [
+            b"alice\x1b[2J\n".as_slice(),
+            b"alice\r\n".as_slice(),
+            b"alice\t\n".as_slice(),
+        ] {
+            let handler = ConnectionHandler::new(new_shared_state(), Duration::ZERO);
+            let mut reader = FrameReader::new(Cursor::new(frame));
+
+            assert!(matches!(
+                handler.read_handshake_username(&mut reader, sender_addr),
+                Err(ServerError::UsernameContainsControlCharacters)
+            ));
+        }
     }
 }

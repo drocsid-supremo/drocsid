@@ -23,6 +23,8 @@ static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 pub enum ServerError {
     #[error("received an empty username during client handshake")]
     EmptyHandshakeUsername,
+    #[error("username contains control characters")]
+    UsernameContainsControlCharacters,
     #[error("username exceeds the maximum length")]
     UsernameTooLong,
     #[error("message exceeds the maximum length")]

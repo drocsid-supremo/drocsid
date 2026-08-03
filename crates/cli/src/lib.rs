@@ -1,8 +1,11 @@
 use clap::{Parser, Subcommand};
+use drocsid_protocol::is_valid_username;
 
 fn non_empty_username(value: &str) -> Result<String, String> {
     if value.trim().is_empty() {
         Err("username cannot be empty".to_string())
+    } else if !is_valid_username(value) {
+        Err("username cannot contain control characters".to_string())
     } else {
         Ok(value.to_string())
     }
@@ -123,6 +126,14 @@ mod tests {
     #[test]
     fn rejects_blank_username() {
         assert!(parse_command(args(&["drocsid", "client", "--username", "   "])).is_err());
+    }
+
+    #[test]
+    fn rejects_username_with_control_characters() {
+        assert!(
+            parse_command(args(&["drocsid", "client", "--username", "alice\u{1b}[2J"])).is_err()
+        );
+        assert!(parse_command(args(&["drocsid", "client", "--username", "alice\nadmin"])).is_err());
     }
 
     #[test]
