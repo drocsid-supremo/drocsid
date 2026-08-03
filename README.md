@@ -37,7 +37,7 @@ cd drocsid
 cargo build --package drocsid
 ```
 
-Start the server in one terminal. It listens on `0.0.0.0:7878` by default:
+Start the server in one terminal. It listens on `127.0.0.1:7878` by default:
 
 ```bash
 cargo run --package drocsid -- server
@@ -82,7 +82,7 @@ The application uses subcommands with conventional long options:
 
 | Command | Option | Default | Description |
 | --- | --- | --- | --- |
-| `server` | `--listen <ADDR>` | `0.0.0.0:7878` | Local address where the server accepts connections. |
+| `server` | `--listen <ADDR>` | `127.0.0.1:7878` | Local address where the server accepts connections. |
 | `server` | `--latency-ms <MS>` | `0` | Artificial delay before broadcasting messages. |
 | `client` | `--connect <ADDR>` | `127.0.0.1:7878` | Server address to connect to. |
 | `client` | `--username <NAME>` | Required | Username sent during the client handshake. |
@@ -98,7 +98,7 @@ drocsid client --connect 3.137.142.191:7878 --username alice
 
 Run `drocsid --help` or `drocsid <command> --help` for the complete command reference. Server and client defaults can be overridden per invocation; no `.env` file is required.
 
-For a server running on another machine, pass its reachable address to the client with `--connect` and allow the selected TCP port through the firewall.
+For a server running on another machine, explicitly bind it to a reachable address with `--listen` and pass that address to the client with `--connect`. The server logs a warning for non-localhost binds because this TCP protocol has no authentication or transport encryption; protect the port with an appropriate network boundary.
 
 ## Observability
 
