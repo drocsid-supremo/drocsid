@@ -6,7 +6,10 @@ use std::{
 };
 
 use drocsid_config::ServerConfig;
-use drocsid_protocol::parse_users_event;
+use drocsid_protocol::{USERS_EVENT_PREFIX, parse_users_event};
+
+const MAX_CHAT_FRAME_BYTES: usize = 4 * 1024;
+const MAX_PRESENCE_FRAME_BYTES: usize = 16 * 1024;
 
 pub enum NetworkEvent {
     Message(String),
@@ -49,7 +52,7 @@ impl ClientConnection {
 fn spawn_reader(mut reader_stream: TcpStream, tx: Sender<NetworkEvent>) {
     thread::spawn(move || {
         let mut buffer = [0; 1024];
-        let mut pending = String::new();
+        let mut pending = Vec::new();
 
         loop {
             let bytes = match reader_stream.read(&mut buffer) {
@@ -63,9 +66,11 @@ fn spawn_reader(mut reader_stream: TcpStream, tx: Sender<NetworkEvent>) {
             };
 
             if bytes == 0 {
-                if !pending.trim().is_empty() {
+                if !pending.is_empty() {
                     let _ = tx.send(NetworkEvent::Message(
-                        pending.trim_end_matches('\n').to_string(),
+                        String::from_utf8_lossy(&pending)
+                            .trim_end_matches('\n')
+                            .to_string(),
                     ));
                 }
 
@@ -75,22 +80,111 @@ fn spawn_reader(mut reader_stream: TcpStream, tx: Sender<NetworkEvent>) {
                 break;
             }
 
-            pending.push_str(&String::from_utf8_lossy(&buffer[..bytes]));
+            pending.extend_from_slice(&buffer[..bytes]);
 
-            while let Some(newline_index) = pending.find('\n') {
-                let line = pending[..newline_index].to_string();
-                pending.drain(..=newline_index);
-
-                if line.trim().is_empty() {
-                    continue;
-                }
-
-                if let Some(users) = parse_users_event(&line) {
-                    let _ = tx.send(NetworkEvent::UserList(users));
-                } else {
-                    let _ = tx.send(NetworkEvent::Message(line));
-                }
+            if !process_pending_frames(&mut pending, &tx) {
+                break;
             }
         }
     });
+}
+
+fn process_pending_frames(pending: &mut Vec<u8>, tx: &Sender<NetworkEvent>) -> bool {
+    while let Some(newline_index) = pending.iter().position(|byte| *byte == b'\n') {
+        if newline_index > max_frame_bytes(&pending[..newline_index]) {
+            let _ = tx.send(NetworkEvent::Disconnected(
+                "server sent an oversized frame".to_string(),
+            ));
+            return false;
+        }
+
+        let line = String::from_utf8_lossy(&pending[..newline_index]).to_string();
+        pending.drain(..=newline_index);
+
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if let Some(users) = parse_users_event(&line) {
+            let _ = tx.send(NetworkEvent::UserList(users));
+        } else {
+            let _ = tx.send(NetworkEvent::Message(line));
+        }
+    }
+
+    if pending.len() > max_frame_bytes(pending) {
+        let _ = tx.send(NetworkEvent::Disconnected(
+            "server sent an oversized frame".to_string(),
+        ));
+        return false;
+    }
+
+    true
+}
+
+fn max_frame_bytes(frame: &[u8]) -> usize {
+    if frame.starts_with(USERS_EVENT_PREFIX.as_bytes()) {
+        MAX_PRESENCE_FRAME_BYTES
+    } else {
+        MAX_CHAT_FRAME_BYTES
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use super::{MAX_CHAT_FRAME_BYTES, NetworkEvent, USERS_EVENT_PREFIX, process_pending_frames};
+
+    #[test]
+    fn rejects_an_oversized_frame_without_a_newline() {
+        let (tx, rx) = mpsc::channel();
+        let mut pending = vec![b'x'; MAX_CHAT_FRAME_BYTES + 1];
+
+        assert!(!process_pending_frames(&mut pending, &tx));
+        assert!(matches!(
+            rx.recv().unwrap(),
+            NetworkEvent::Disconnected(reason) if reason == "server sent an oversized frame"
+        ));
+    }
+
+    #[test]
+    fn rejects_an_oversized_delimited_frame() {
+        let (tx, rx) = mpsc::channel();
+        let mut pending = format!("{}\n", "x".repeat(MAX_CHAT_FRAME_BYTES + 1)).into_bytes();
+
+        assert!(!process_pending_frames(&mut pending, &tx));
+        assert!(matches!(
+            rx.recv().unwrap(),
+            NetworkEvent::Disconnected(reason) if reason == "server sent an oversized frame"
+        ));
+    }
+
+    #[test]
+    fn accepts_a_presence_frame_larger_than_the_chat_limit() {
+        let (tx, rx) = mpsc::channel();
+        let mut pending =
+            format!("{USERS_EVENT_PREFIX}{}\n", "x".repeat(MAX_CHAT_FRAME_BYTES)).into_bytes();
+
+        assert!(process_pending_frames(&mut pending, &tx));
+        assert!(matches!(rx.recv().unwrap(), NetworkEvent::UserList(_)));
+    }
+
+    #[test]
+    fn counts_frame_bytes_before_decoding_split_utf8() {
+        let (tx, rx) = mpsc::channel();
+        let mut frame = vec![b'x'; MAX_CHAT_FRAME_BYTES - 3];
+        frame.extend_from_slice("€".as_bytes());
+        frame.push(b'\n');
+
+        let mut pending = frame[..MAX_CHAT_FRAME_BYTES - 2].to_vec();
+        assert!(process_pending_frames(&mut pending, &tx));
+
+        pending.extend_from_slice(&frame[MAX_CHAT_FRAME_BYTES - 2..]);
+        assert!(process_pending_frames(&mut pending, &tx));
+        assert!(matches!(
+            rx.recv().unwrap(),
+            NetworkEvent::Message(message) if message.len() == MAX_CHAT_FRAME_BYTES
+        ));
+    }
 }
