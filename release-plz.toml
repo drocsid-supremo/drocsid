@@ -1,11 +1,12 @@
 [workspace]
 repo_url = "https://github.com/drocsid-supremo/drocsid"
 changelog_update = false
+pr_name = "Release v{{ version }}"
 pr_body = """
-## Release
-
 {% for release in releases %}
 {% if release.package == "drocsid" %}
+## Release v{{ release.next_version }}
+
 {{ release.changelog }}
 {% endif %}
 {% endfor %}
@@ -13,6 +14,17 @@ pr_body = """
 git_tag_enable = false
 git_release_enable = false
 publish_timeout = "10m"
+
+[changelog]
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+
+{% for commit in commits %}
+- {% if commit.scope %}(`{{ commit.scope | upper_first }}`) {% endif %}{% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message | upper_first }}{% if commit.links %} ({% for link in commit.links %}[{{ link.text }}]({{ link.href }}) {% endfor %}){% endif %}
+{% endfor %}
+{% endfor %}
+"""
 
 [[package]]
 name = "drocsid"
