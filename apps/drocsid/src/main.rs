@@ -15,13 +15,22 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = dotenvy::dotenv();
-    let server_config = ServerConfig::from_env();
-    let command = parse_command(std::env::args())?;
+    let command = match parse_command(std::env::args()) {
+        Ok(command) => command,
+        Err(error) => {
+            let exit_code = error.exit_code();
+            error.print()?;
+            std::process::exit(exit_code);
+        }
+    };
 
     match command {
-        Command::Server => run_server(&server_config)?,
-        Command::Client { username } => run_client(&username, &server_config)?,
+        Command::Server { listen, latency_ms } => {
+            run_server(&ServerConfig::for_server(listen, latency_ms))?
+        }
+        Command::Client { username, connect } => {
+            run_client(&username, &ServerConfig::for_client(connect))?
+        }
     }
 
     Ok(())
