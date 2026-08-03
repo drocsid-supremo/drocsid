@@ -6,9 +6,10 @@ use std::{
 };
 
 use drocsid_config::ServerConfig;
-use drocsid_protocol::parse_users_event;
+use drocsid_protocol::{USERS_EVENT_PREFIX, parse_users_event};
 
-const MAX_FRAME_BYTES: usize = 4 * 1024;
+const MAX_CHAT_FRAME_BYTES: usize = 4 * 1024;
+const MAX_PRESENCE_FRAME_BYTES: usize = 16 * 1024;
 
 pub enum NetworkEvent {
     Message(String),
@@ -88,7 +89,7 @@ fn spawn_reader(mut reader_stream: TcpStream, tx: Sender<NetworkEvent>) {
 
 fn process_pending_frames(pending: &mut String, tx: &Sender<NetworkEvent>) -> bool {
     while let Some(newline_index) = pending.find('\n') {
-        if newline_index > MAX_FRAME_BYTES {
+        if newline_index > max_frame_bytes(&pending[..newline_index]) {
             let _ = tx.send(NetworkEvent::Disconnected(
                 "server sent an oversized frame".to_string(),
             ));
@@ -109,7 +110,7 @@ fn process_pending_frames(pending: &mut String, tx: &Sender<NetworkEvent>) -> bo
         }
     }
 
-    if pending.len() > MAX_FRAME_BYTES {
+    if pending.len() > max_frame_bytes(pending) {
         let _ = tx.send(NetworkEvent::Disconnected(
             "server sent an oversized frame".to_string(),
         ));
@@ -119,16 +120,24 @@ fn process_pending_frames(pending: &mut String, tx: &Sender<NetworkEvent>) -> bo
     true
 }
 
+fn max_frame_bytes(frame: &str) -> usize {
+    if frame.starts_with(USERS_EVENT_PREFIX) {
+        MAX_PRESENCE_FRAME_BYTES
+    } else {
+        MAX_CHAT_FRAME_BYTES
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
 
-    use super::{MAX_FRAME_BYTES, NetworkEvent, process_pending_frames};
+    use super::{MAX_CHAT_FRAME_BYTES, NetworkEvent, USERS_EVENT_PREFIX, process_pending_frames};
 
     #[test]
     fn rejects_an_oversized_frame_without_a_newline() {
         let (tx, rx) = mpsc::channel();
-        let mut pending = "x".repeat(MAX_FRAME_BYTES + 1);
+        let mut pending = "x".repeat(MAX_CHAT_FRAME_BYTES + 1);
 
         assert!(!process_pending_frames(&mut pending, &tx));
         assert!(matches!(
@@ -140,12 +149,21 @@ mod tests {
     #[test]
     fn rejects_an_oversized_delimited_frame() {
         let (tx, rx) = mpsc::channel();
-        let mut pending = format!("{}\n", "x".repeat(MAX_FRAME_BYTES + 1));
+        let mut pending = format!("{}\n", "x".repeat(MAX_CHAT_FRAME_BYTES + 1));
 
         assert!(!process_pending_frames(&mut pending, &tx));
         assert!(matches!(
             rx.recv().unwrap(),
             NetworkEvent::Disconnected(reason) if reason == "server sent an oversized frame"
         ));
+    }
+
+    #[test]
+    fn accepts_a_presence_frame_larger_than_the_chat_limit() {
+        let (tx, rx) = mpsc::channel();
+        let mut pending = format!("{USERS_EVENT_PREFIX}{}\n", "x".repeat(MAX_CHAT_FRAME_BYTES));
+
+        assert!(process_pending_frames(&mut pending, &tx));
+        assert!(matches!(rx.recv().unwrap(), NetworkEvent::UserList(_)));
     }
 }
