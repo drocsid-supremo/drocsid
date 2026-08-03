@@ -100,6 +100,23 @@ cargo build --package drocsid --release
 
 The release workflow must continue to build the `drocsid` package explicitly so adding libraries to the workspace does not change which binary is published.
 
+## GitHub governance
+
+The repository's active GitHub ruleset targets the default branch, `mosquitao`. Changes to this branch must go through a pull request; direct pushes, force pushes, branch deletion, and bypasses are not allowed.
+
+Pull requests targeting `mosquitao` must satisfy all of the following before merging:
+
+- At least one approving review.
+- Existing approvals are dismissed when new commits are pushed.
+- All review conversations are resolved.
+- The `rust` GitHub Actions check passes.
+- The branch is up to date with `mosquitao`.
+- Linear history is maintained.
+
+Changes should be developed on a separate branch and submitted through a pull request. Do not rely on local validation alone; the required `rust` check is the merge gate configured by the repository ruleset.
+
+The ruleset is managed in the repository settings and is not represented by a tracked repository file. Keep this section synchronized if the GitHub ruleset changes.
+
 ## Architecture changes
 
 When adding or changing a component:
