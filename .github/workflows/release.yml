@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -20,6 +25,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -38,7 +45,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.name }}
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: validate
     runs-on: ${{ matrix.runner }}
 
@@ -97,6 +104,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -130,7 +139,7 @@ jobs:
           ARCHITECTURE: ${{ matrix.architecture }}
           BINARY_EXTENSION: ${{ matrix.extension }}
           ARCHIVE_EXTENSION: ${{ matrix.archive_extension }}
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
 
@@ -152,55 +161,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}-${{ matrix.architecture }}
-          path: ${{ runner.temp }}/drocsid-${{ github.ref_name }}-${{ matrix.platform }}-${{ matrix.architecture }}.${{ matrix.archive_extension }}
+          path: ${{ runner.temp }}/drocsid-${{ inputs.tag || github.ref_name }}-${{ matrix.platform }}-${{ matrix.architecture }}.${{ matrix.archive_extension }}
           if-no-files-found: error
           retention-days: 1
 
-  publish-crates:
-    name: Publish crates.io packages
-    needs: validate
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Publish crates in dependency order
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "drocsid") | .version')"
-
-          publish_crate() {
-            local package_name="$1"
-
-            if cargo info --registry crates-io "${package_name}@${package_version}" \
-              > /dev/null 2>&1; then
-              echo "Skipping ${package_name} v${package_version}: already published"
-            else
-              cargo publish --locked --package "${package_name}"
-            fi
-          }
-
-          publish_crate drocsid-protocol
-          publish_crate drocsid-config
-          publish_crate drocsid-cli
-          publish_crate drocsid-client
-          publish_crate drocsid-server
-          publish_crate drocsid-tui
-          publish_crate drocsid
-
   publish:
     name: Publish GitHub Release
-    if: github.event_name == 'push' && needs.build.result == 'success' && needs.publish-crates.result == 'success'
-    needs:
-      - build
-      - publish-crates
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.build.result == 'success'
+    needs: build
     runs-on: ubuntu-latest
 
     steps:
@@ -217,4 +185,4 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/* --repo "${GITHUB_REPOSITORY}" --generate-notes --title "drocsid ${{ github.ref_name }}"
+        run: gh release create "${{ inputs.tag || github.ref_name }}" dist/* --repo "${GITHUB_REPOSITORY}" --generate-notes --title "drocsid ${{ inputs.tag || github.ref_name }}"

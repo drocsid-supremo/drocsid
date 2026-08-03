@@ -171,6 +171,12 @@ cargo test --all-targets
 
 These checks are also executed by the GitHub Actions workflow in `.github/workflows/ci.yml`.
 
+## Releases
+
+Releases are managed by [release-plz](https://release-plz.dev/). After changes reach the `mosquitao` branch, release-plz creates or updates a release pull request with the required Cargo version changes. Merging that pull request publishes the workspace crates and creates a `vX.Y.Z` tag for the executable package.
+
+The tag starts the multiplatform release workflow, which builds the `drocsid` executable for Windows, macOS, Linux, and Android/Termux and attaches the archives to the GitHub Release. The `CARGO_REGISTRY_TOKEN` secret is required by GitHub Actions to publish to crates.io.
+
 ## Architecture
 
 The application is organized as a Cargo workspace with focused crates:

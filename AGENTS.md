@@ -100,6 +100,10 @@ cargo build --package drocsid --release
 
 The release workflow must continue to build the `drocsid` package explicitly so adding libraries to the workspace does not change which binary is published.
 
+Release versioning and crates.io publication are managed by `release-plz`. Pushes to `mosquitao` create or update a release pull request; after that pull request is merged, `release-plz` updates package versions, publishes the workspace crates, and creates a single `vX.Y.Z` tag for the `drocsid` package. The tag dispatches the existing multiplatform binary-release workflow.
+
+Keep the `CARGO_REGISTRY_TOKEN` GitHub Actions secret configured with permission to publish the workspace crates. Do not manually bump versions or publish crates from the release workflow unless the release-plz configuration is intentionally changed.
+
 ## GitHub governance
 
 The repository's active GitHub ruleset targets the default branch, `mosquitao`. Changes to this branch must go through a pull request; direct pushes, force pushes, branch deletion, and bypasses are not allowed.
