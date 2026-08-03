@@ -7,6 +7,6 @@ repository.workspace = true
 description = "TCP client state and networking for drocsid."
 
 [dependencies]
-drocsid-config = { version = "0.2.0", path = "../config" }
-drocsid-protocol = { version = "0.2.0", path = "../protocol" }
+drocsid-config = { version = "0.2.1", path = "../config" }
+drocsid-protocol = { version = "0.2.1", path = "../protocol" }
 tracing = "0.1"
