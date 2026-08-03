@@ -36,11 +36,21 @@ impl ConnectionHandler {
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         stream.set_nodelay(true)?;
 
+        let username = {
+            let mut handshake_reader = FrameReader::new(stream.try_clone()?);
+            self.read_handshake_username(&mut handshake_reader, sender_addr)?
+        };
+        stream.set_read_timeout(None)?;
         let mut reader = FrameReader::new(stream.try_clone()?);
-        let username = self.read_handshake_username(&mut reader, sender_addr)?;
 
         set_client_username(&self.state, sender_addr, &username)?;
-        self.send_message_history(&mut stream)?;
+        if let Err(error) = self.send_message_history(&mut stream) {
+            remove_client(&self.state, sender_addr)?;
+            return match error {
+                ServerError::Io(error) if is_disconnect_error(&error) => Ok(()),
+                error => Err(error),
+            };
+        }
         broadcast_presence(&self.state)?;
 
         let join_message = format!("@{} has entered the chat. Say hello!\n", username);
@@ -210,7 +220,11 @@ enum FrameError {
 fn is_disconnect_error(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
-        ErrorKind::BrokenPipe | ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset
+        ErrorKind::BrokenPipe
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::TimedOut
+            | ErrorKind::WouldBlock
     )
 }
 
