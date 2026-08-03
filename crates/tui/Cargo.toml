@@ -9,7 +9,7 @@ description = "Ratatui terminal interface for drocsid."
 [dependencies]
 chrono = "0.4"
 crossterm = "0.29"
-drocsid-client = { version = "0.1.0", path = "../client" }
-drocsid-config = { version = "0.1.0", path = "../config" }
-drocsid-protocol = { version = "0.1.0", path = "../protocol" }
+drocsid-client = { version = "0.1.1", path = "../client" }
+drocsid-config = { version = "0.1.1", path = "../config" }
+drocsid-protocol = { version = "0.1.1", path = "../protocol" }
 ratatui = "0.30.1"
