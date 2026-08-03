@@ -8,9 +8,15 @@ use std::{
 use crate::ServerError;
 
 use super::state::{
-    ServerStateHandle, broadcast, broadcast_presence, message_history, record_message,
-    remove_client, set_client_username,
+    ServerStateHandle, allow_message, broadcast, broadcast_presence, message_history,
+    record_message, remove_client, set_client_username,
 };
+
+const MAX_MESSAGE_BYTES: usize = 4 * 1024;
+const MAX_USERNAME_BYTES: usize = 32;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct ConnectionHandler {
     state: ServerStateHandle,
@@ -27,7 +33,12 @@ impl ConnectionHandler {
 
     pub fn serve(&self, mut stream: TcpStream) -> Result<(), ServerError> {
         let sender_addr = stream.peer_addr()?;
-        let username = self.read_handshake_username(&mut stream, sender_addr)?;
+        stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+        stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+        stream.set_nodelay(true)?;
+
+        let mut reader = FrameReader::new(stream.try_clone()?);
+        let username = self.read_handshake_username(&mut reader, sender_addr)?;
 
         set_client_username(&self.state, sender_addr, &username)?;
         self.send_message_history(&mut stream)?;
@@ -38,23 +49,41 @@ impl ConnectionHandler {
         record_message(&self.state, &join_message)?;
         broadcast(&self.state, &join_message, None)?;
 
-        self.read_messages(stream, sender_addr, &username)
+        stream.set_read_timeout(Some(READ_TIMEOUT))?;
+        let result = self.read_messages(&mut reader, sender_addr);
+        self.disconnect_client(sender_addr, &username)?;
+        result
     }
 
     fn read_handshake_username(
         &self,
-        stream: &mut TcpStream,
+        reader: &mut FrameReader<TcpStream>,
         sender_addr: SocketAddr,
     ) -> Result<String, ServerError> {
-        let mut buffer = [0; 1024];
-        let bytes = stream.read(&mut buffer)?;
-
-        if bytes == 0 {
-            remove_client(&self.state, sender_addr)?;
-            return Err(ServerError::EmptyHandshakeUsername);
+        let username = match reader.read_frame(MAX_USERNAME_BYTES) {
+            Ok(Some(bytes)) => match String::from_utf8(bytes) {
+                Ok(username) => username,
+                Err(_) => {
+                    remove_client(&self.state, sender_addr)?;
+                    return Err(ServerError::InvalidUtf8);
+                }
+            },
+            Ok(None) => {
+                remove_client(&self.state, sender_addr)?;
+                return Err(ServerError::EmptyHandshakeUsername);
+            }
+            Err(FrameError::TooLong) => {
+                remove_client(&self.state, sender_addr)?;
+                return Err(ServerError::UsernameTooLong);
+            }
+            Err(FrameError::Io(error)) => {
+                let _ = remove_client(&self.state, sender_addr);
+                return Err(error.into());
+            }
         }
+        .trim()
+        .to_string();
 
-        let username = String::from_utf8_lossy(&buffer[..bytes]).trim().to_string();
         if username.is_empty() {
             remove_client(&self.state, sender_addr)?;
             return Err(ServerError::EmptyHandshakeUsername);
@@ -65,35 +94,31 @@ impl ConnectionHandler {
 
     fn read_messages(
         &self,
-        mut stream: TcpStream,
+        reader: &mut FrameReader<TcpStream>,
         sender_addr: SocketAddr,
-        username: &str,
     ) -> Result<(), ServerError> {
-        let mut buffer = [0; 1024];
-
         loop {
-            let bytes = match stream.read(&mut buffer) {
-                Ok(bytes) => bytes,
-                Err(error) if is_disconnect_error(&error) => {
-                    self.disconnect_client(sender_addr, username)?;
-                    return Ok(());
-                }
-                Err(error) => return Err(error.into()),
+            let bytes = match reader.read_frame(MAX_MESSAGE_BYTES) {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => return Ok(()),
+                Err(FrameError::TooLong) => return Err(ServerError::MessageTooLong),
+                Err(FrameError::Io(error)) if is_disconnect_error(&error) => return Ok(()),
+                Err(FrameError::Io(error)) => return Err(error.into()),
             };
+            let message = String::from_utf8(bytes).map_err(|_| ServerError::InvalidUtf8)?;
 
-            if bytes == 0 {
-                self.disconnect_client(sender_addr, username)?;
-                return Ok(());
+            if message.trim().is_empty() {
+                continue;
             }
 
-            let message = String::from_utf8_lossy(&buffer[..bytes]);
+            allow_message(&self.state, sender_addr)?;
 
             if !self.simulated_latency.is_zero() {
                 thread::sleep(self.simulated_latency);
             }
 
             record_message(&self.state, &message)?;
-            broadcast(&self.state, &message, None)?;
+            broadcast(&self.state, &format!("{message}\n"), None)?;
         }
     }
 
@@ -123,9 +148,101 @@ impl ConnectionHandler {
     }
 }
 
+struct FrameReader<R> {
+    reader: R,
+    buffer: [u8; 1024],
+    offset: usize,
+    length: usize,
+}
+
+impl<R: Read> FrameReader<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader,
+            buffer: [0; 1024],
+            offset: 0,
+            length: 0,
+        }
+    }
+
+    fn read_frame(&mut self, max_bytes: usize) -> Result<Option<Vec<u8>>, FrameError> {
+        let mut frame = Vec::new();
+
+        loop {
+            let byte = match self.read_byte().map_err(FrameError::Io)? {
+                Some(byte) => byte,
+                None if frame.is_empty() => return Ok(None),
+                None => return Ok(Some(frame)),
+            };
+
+            if byte == b'\n' {
+                return Ok(Some(frame));
+            }
+
+            if frame.len() >= max_bytes {
+                return Err(FrameError::TooLong);
+            }
+
+            frame.push(byte);
+        }
+    }
+
+    fn read_byte(&mut self) -> std::io::Result<Option<u8>> {
+        if self.offset == self.length {
+            self.length = self.reader.read(&mut self.buffer)?;
+            self.offset = 0;
+
+            if self.length == 0 {
+                return Ok(None);
+            }
+        }
+
+        let byte = self.buffer[self.offset];
+        self.offset += 1;
+        Ok(Some(byte))
+    }
+}
+
+#[derive(Debug)]
+enum FrameError {
+    Io(std::io::Error),
+    TooLong,
+}
+
 fn is_disconnect_error(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
         ErrorKind::BrokenPipe | ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::{FrameError, FrameReader};
+
+    #[test]
+    fn reads_newline_delimited_frames() {
+        let mut reader = FrameReader::new(Cursor::new(b"hello\nworld\n"));
+
+        assert_eq!(reader.read_frame(16).unwrap(), Some(b"hello".to_vec()));
+        assert_eq!(reader.read_frame(16).unwrap(), Some(b"world".to_vec()));
+        assert_eq!(reader.read_frame(16).unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_frames_over_the_configured_limit() {
+        let mut reader = FrameReader::new(Cursor::new(b"12345\n"));
+
+        assert!(matches!(reader.read_frame(4), Err(FrameError::TooLong)));
+    }
+
+    #[test]
+    fn accepts_a_frame_without_a_trailing_newline_at_eof() {
+        let mut reader = FrameReader::new(Cursor::new(b"hello"));
+
+        assert_eq!(reader.read_frame(16).unwrap(), Some(b"hello".to_vec()));
+        assert_eq!(reader.read_frame(16).unwrap(), None);
+    }
 }

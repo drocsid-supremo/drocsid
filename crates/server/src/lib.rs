@@ -13,6 +13,16 @@ use state::{new_shared_state, register_client};
 pub enum ServerError {
     #[error("received an empty username during client handshake")]
     EmptyHandshakeUsername,
+    #[error("username exceeds the maximum length")]
+    UsernameTooLong,
+    #[error("message exceeds the maximum length")]
+    MessageTooLong,
+    #[error("received invalid UTF-8 data")]
+    InvalidUtf8,
+    #[error("connection limit reached")]
+    ConnectionLimitReached,
+    #[error("message rate limit exceeded")]
+    MessageRateLimitExceeded,
     #[error("shared client state is poisoned")]
     ClientStatePoisoned,
     #[error("io error: {0}")]
