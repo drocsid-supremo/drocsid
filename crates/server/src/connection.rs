@@ -11,8 +11,8 @@ use drocsid_protocol::{format_chat_message, is_valid_username};
 use tracing::{debug, info, warn};
 
 use super::state::{
-    ServerStateHandle, allow_message, broadcast, broadcast_presence, message_history,
-    record_message, register_client, remove_client, set_client_username,
+    ServerStateHandle, allow_message, broadcast, broadcast_presence, history_snapshot,
+    mark_client_ready, record_message, register_pending_client, remove_client, set_client_username,
 };
 
 const MAX_MESSAGE_BYTES: usize = 4 * 1024;
@@ -66,7 +66,7 @@ impl ConnectionHandler {
         };
 
         stream.set_read_timeout(None)?;
-        register_client(&self.state, stream)?;
+        register_pending_client(&self.state, stream)?;
         set_client_username(&self.state, sender_addr, &username)?;
         Ok(username)
     }
@@ -96,14 +96,14 @@ impl ConnectionHandler {
 
     fn serve_authenticated_inner(
         &self,
-        mut stream: TcpStream,
+        stream: TcpStream,
         sender_addr: SocketAddr,
         username: String,
     ) -> Result<(), ServerError> {
         let mut reader = FrameReader::new(stream.try_clone()?);
         info!(username = ?username, phase = "handshake", "handshake completed");
 
-        if let Err(error) = self.send_message_history(&mut stream) {
+        if let Err(error) = self.send_message_history(sender_addr) {
             remove_client(&self.state, sender_addr)?;
             warn!(
                 error = %error,
@@ -116,6 +116,7 @@ impl ConnectionHandler {
                 error => Err(error),
             };
         }
+        mark_client_ready(&self.state, sender_addr)?;
         broadcast_presence(&self.state)?;
 
         let join_message = format!("@{} has entered the chat. Say hello!\n", username);
@@ -258,8 +259,13 @@ impl ConnectionHandler {
         Ok(())
     }
 
-    fn send_message_history(&self, stream: &mut TcpStream) -> Result<(), ServerError> {
-        for message in message_history(&self.state)? {
+    fn send_message_history(&self, sender_addr: SocketAddr) -> Result<(), ServerError> {
+        let (writer, history) = history_snapshot(&self.state, sender_addr)?;
+        let mut stream = writer
+            .lock()
+            .map_err(|_| ServerError::ClientStatePoisoned)?;
+
+        for message in history {
             stream.write_all(message.as_bytes())?;
             stream.write_all(b"\n")?;
         }

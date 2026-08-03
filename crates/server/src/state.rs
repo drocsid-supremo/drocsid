@@ -29,10 +29,14 @@ struct RateLimitState {
     last_refill: Instant,
 }
 
+pub(crate) type ClientWriter = Arc<Mutex<TcpStream>>;
+
 struct ClientEntry {
     addr: SocketAddr,
-    stream: TcpStream,
+    writer: ClientWriter,
     username: Option<String>,
+    ready: bool,
+    pending_messages: Vec<String>,
 }
 
 impl ServerState {
@@ -49,7 +53,26 @@ pub fn new_shared_state() -> ServerStateHandle {
     Arc::new(Mutex::new(ServerState::new()))
 }
 
-pub fn register_client(state: &ServerStateHandle, stream: &TcpStream) -> Result<(), ServerError> {
+#[cfg(test)]
+pub(crate) fn register_client(
+    state: &ServerStateHandle,
+    stream: &TcpStream,
+) -> Result<(), ServerError> {
+    register_client_with_status(state, stream, true)
+}
+
+pub(crate) fn register_pending_client(
+    state: &ServerStateHandle,
+    stream: &TcpStream,
+) -> Result<(), ServerError> {
+    register_client_with_status(state, stream, false)
+}
+
+fn register_client_with_status(
+    state: &ServerStateHandle,
+    stream: &TcpStream,
+    ready: bool,
+) -> Result<(), ServerError> {
     let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
     let address = stream.peer_addr()?;
 
@@ -66,10 +89,62 @@ pub fn register_client(state: &ServerStateHandle, stream: &TcpStream) -> Result<
 
     state.clients.push(ClientEntry {
         addr: address,
-        stream: stream.try_clone()?,
+        writer: Arc::new(Mutex::new(stream.try_clone()?)),
         username: None,
+        ready,
+        pending_messages: Vec::new(),
     });
     Ok(())
+}
+
+pub(crate) fn mark_client_ready(
+    state: &ServerStateHandle,
+    target_addr: SocketAddr,
+) -> Result<(), ServerError> {
+    let writer = {
+        let state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
+        state
+            .clients
+            .iter()
+            .find(|client| client.addr == target_addr)
+            .map(|client| Arc::clone(&client.writer))
+            .ok_or(ServerError::ClientStatePoisoned)?
+    };
+
+    let mut stream = writer
+        .lock()
+        .map_err(|_| ServerError::ClientStatePoisoned)?;
+    let pending_messages = {
+        let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
+
+        let client = state
+            .clients
+            .iter_mut()
+            .find(|client| client.addr == target_addr)
+            .ok_or(ServerError::ClientStatePoisoned)?;
+        client.ready = true;
+        std::mem::take(&mut client.pending_messages)
+    };
+
+    for message in pending_messages {
+        stream.write_all(message.as_bytes())?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn history_snapshot(
+    state: &ServerStateHandle,
+    target_addr: SocketAddr,
+) -> Result<(ClientWriter, Vec<String>), ServerError> {
+    let state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
+
+    state
+        .clients
+        .iter()
+        .find(|client| client.addr == target_addr)
+        .map(|client| (Arc::clone(&client.writer), state.history.clone()))
+        .ok_or(ServerError::ClientStatePoisoned)
 }
 
 pub fn remove_client(
@@ -134,22 +209,34 @@ pub fn set_client_username(
     Ok(())
 }
 
-pub fn broadcast(
+pub(crate) fn broadcast(
     state: &ServerStateHandle,
     message: &str,
     exclude_addr: Option<SocketAddr>,
 ) -> Result<(), ServerError> {
     let clients = {
-        let state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
-        state
-            .clients
-            .iter()
-            .filter(|client| exclude_addr.is_none_or(|addr| client.addr != addr))
-            .map(|client| Ok((client.addr, client.stream.try_clone()?)))
-            .collect::<Result<Vec<_>, std::io::Error>>()?
+        let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
+        let mut clients = Vec::new();
+
+        for client in &mut state.clients {
+            if exclude_addr.is_some_and(|addr| client.addr == addr) {
+                continue;
+            }
+
+            if client.ready {
+                clients.push((client.addr, Arc::clone(&client.writer)));
+            } else {
+                client.pending_messages.push(message.to_string());
+            }
+        }
+
+        clients
     };
 
-    for (address, mut stream) in clients {
+    for (address, writer) in clients {
+        let mut stream = writer
+            .lock()
+            .map_err(|_| ServerError::ClientStatePoisoned)?;
         if let Err(error) = stream.write_all(message.as_bytes()) {
             warn!(
                 %address,
@@ -178,11 +265,6 @@ pub fn broadcast_presence(state: &ServerStateHandle) -> Result<(), ServerError> 
     broadcast(state, &build_users_event(&users), None)
 }
 
-pub fn message_history(state: &ServerStateHandle) -> Result<Vec<String>, ServerError> {
-    let state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
-    Ok(state.history.clone())
-}
-
 pub fn record_message(state: &ServerStateHandle, message: &str) -> Result<(), ServerError> {
     let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
     state
@@ -195,4 +277,58 @@ pub fn record_message(state: &ServerStateHandle, message: &str) -> Result<(), Se
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::{TcpListener, TcpStream},
+        thread,
+        time::Duration,
+    };
+
+    use super::{
+        broadcast, history_snapshot, mark_client_ready, new_shared_state, register_pending_client,
+    };
+
+    #[test]
+    fn pending_clients_do_not_receive_live_broadcasts_before_history_replay() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_stream, client_addr) = listener.accept().unwrap();
+        let state = new_shared_state();
+
+        register_pending_client(&state, &server_stream).unwrap();
+        let (writer, _) = history_snapshot(&state, client_addr).unwrap();
+        let replay_writer = writer.lock().unwrap();
+        let broadcast_state = state.clone();
+        let broadcast_thread = thread::spawn(move || {
+            broadcast(&broadcast_state, "live during history\n", None).unwrap();
+        });
+        broadcast_thread.join().unwrap();
+
+        client_stream
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let mut unexpected = [0; 1];
+        assert!(client_stream.read(&mut unexpected).is_err());
+
+        (&*replay_writer).write_all(b"history\n").unwrap();
+        drop(replay_writer);
+        mark_client_ready(&state, client_addr).unwrap();
+
+        client_stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut reader = BufReader::new(client_stream);
+        let mut lines = Vec::new();
+        for _ in 0..2 {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            lines.push(line);
+        }
+
+        assert_eq!(lines, ["history\n", "live during history\n"]);
+    }
 }
