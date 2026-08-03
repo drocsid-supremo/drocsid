@@ -8,6 +8,8 @@ use std::{
 use drocsid_config::ServerConfig;
 use drocsid_protocol::parse_users_event;
 
+const MAX_FRAME_BYTES: usize = 4 * 1024;
+
 pub enum NetworkEvent {
     Message(String),
     UserList(Vec<String>),
@@ -77,20 +79,73 @@ fn spawn_reader(mut reader_stream: TcpStream, tx: Sender<NetworkEvent>) {
 
             pending.push_str(&String::from_utf8_lossy(&buffer[..bytes]));
 
-            while let Some(newline_index) = pending.find('\n') {
-                let line = pending[..newline_index].to_string();
-                pending.drain(..=newline_index);
-
-                if line.trim().is_empty() {
-                    continue;
-                }
-
-                if let Some(users) = parse_users_event(&line) {
-                    let _ = tx.send(NetworkEvent::UserList(users));
-                } else {
-                    let _ = tx.send(NetworkEvent::Message(line));
-                }
+            if !process_pending_frames(&mut pending, &tx) {
+                break;
             }
         }
     });
+}
+
+fn process_pending_frames(pending: &mut String, tx: &Sender<NetworkEvent>) -> bool {
+    while let Some(newline_index) = pending.find('\n') {
+        if newline_index > MAX_FRAME_BYTES {
+            let _ = tx.send(NetworkEvent::Disconnected(
+                "server sent an oversized frame".to_string(),
+            ));
+            return false;
+        }
+
+        let line = pending[..newline_index].to_string();
+        pending.drain(..=newline_index);
+
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if let Some(users) = parse_users_event(&line) {
+            let _ = tx.send(NetworkEvent::UserList(users));
+        } else {
+            let _ = tx.send(NetworkEvent::Message(line));
+        }
+    }
+
+    if pending.len() > MAX_FRAME_BYTES {
+        let _ = tx.send(NetworkEvent::Disconnected(
+            "server sent an oversized frame".to_string(),
+        ));
+        return false;
+    }
+
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use super::{MAX_FRAME_BYTES, NetworkEvent, process_pending_frames};
+
+    #[test]
+    fn rejects_an_oversized_frame_without_a_newline() {
+        let (tx, rx) = mpsc::channel();
+        let mut pending = "x".repeat(MAX_FRAME_BYTES + 1);
+
+        assert!(!process_pending_frames(&mut pending, &tx));
+        assert!(matches!(
+            rx.recv().unwrap(),
+            NetworkEvent::Disconnected(reason) if reason == "server sent an oversized frame"
+        ));
+    }
+
+    #[test]
+    fn rejects_an_oversized_delimited_frame() {
+        let (tx, rx) = mpsc::channel();
+        let mut pending = format!("{}\n", "x".repeat(MAX_FRAME_BYTES + 1));
+
+        assert!(!process_pending_frames(&mut pending, &tx));
+        assert!(matches!(
+            rx.recv().unwrap(),
+            NetworkEvent::Disconnected(reason) if reason == "server sent an oversized frame"
+        ));
+    }
 }
