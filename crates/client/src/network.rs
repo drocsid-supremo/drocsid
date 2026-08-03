@@ -35,7 +35,7 @@ impl ClientConnection {
     }
 
     pub fn send_message(&mut self, message: &str) -> std::io::Result<()> {
-        self.stream.write_all(message.as_bytes())
+        self.stream.write_all(format!("{message}\n").as_bytes())
     }
 
     pub fn is_disconnect_error(error: &std::io::Error) -> bool {
