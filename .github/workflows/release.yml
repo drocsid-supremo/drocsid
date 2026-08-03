@@ -11,9 +11,6 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write
-
 env:
   BINARY_NAME: drocsid
 
@@ -21,15 +18,18 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -48,6 +48,8 @@ jobs:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: validate
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
 
     strategy:
       fail-fast: false
@@ -103,12 +105,13 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -118,7 +121,7 @@ jobs:
 
       - name: Install Android NDK
         if: matrix.target == 'aarch64-linux-android'
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
           packages: ndk;26.3.11579264
 
@@ -158,7 +161,7 @@ jobs:
           fi
 
       - name: Upload release archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.platform }}-${{ matrix.architecture }}
           path: ${{ runner.temp }}/drocsid-${{ inputs.tag || github.ref_name }}-${{ matrix.platform }}-${{ matrix.architecture }}.${{ matrix.archive_extension }}
@@ -170,10 +173,12 @@ jobs:
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.build.result == 'success'
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Download release archives
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
