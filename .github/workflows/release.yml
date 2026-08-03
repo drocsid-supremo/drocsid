@@ -154,9 +154,37 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  publish-crates:
+    name: Publish crates.io packages
+    needs: validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          cargo publish --locked --package drocsid-protocol
+          cargo publish --locked --package drocsid-config
+          cargo publish --locked --package drocsid-cli
+          cargo publish --locked --package drocsid-client
+          cargo publish --locked --package drocsid-server
+          cargo publish --locked --package drocsid-tui
+          cargo publish --locked --package drocsid
+
   publish:
     name: Publish GitHub Release
-    needs: build
+    needs:
+      - build
+      - publish-crates
     runs-on: ubuntu-latest
 
     steps:

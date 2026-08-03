@@ -28,6 +28,12 @@ A small terminal chat application written in Rust. drocsid uses a TCP server and
 
 Install Rust through [rustup](https://rustup.rs/) if it is not already available.
 
+To install the executable from crates.io after Rust is available:
+
+```bash
+cargo install drocsid
+```
+
 ## Getting started
 
 Clone the repository and enter the project directory:
