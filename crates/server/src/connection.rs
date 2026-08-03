@@ -1,5 +1,5 @@
 use std::{
-    io::{ErrorKind, Read, Write},
+    io::{ErrorKind, Read},
     net::{SocketAddr, TcpStream},
     thread,
     time::Duration,
@@ -11,8 +11,8 @@ use drocsid_protocol::{USERS_EVENT_PREFIX, format_chat_message, is_valid_usernam
 use tracing::{debug, info, warn};
 
 use super::state::{
-    ServerStateHandle, allow_message, broadcast, broadcast_presence, history_snapshot,
-    mark_client_ready, record_message, register_pending_client, remove_client, set_client_username,
+    ClientToken, ServerStateHandle, allow_message, broadcast, broadcast_presence, history_snapshot,
+    mark_client_ready, record_message, register_pending_client, set_client_username,
 };
 
 const MAX_MESSAGE_BYTES: usize = 4 * 1024;
@@ -37,7 +37,7 @@ impl ConnectionHandler {
         &self,
         stream: &mut TcpStream,
         sender_addr: SocketAddr,
-    ) -> Result<String, ServerError> {
+    ) -> Result<(String, ClientToken), ServerError> {
         self.authenticate_with_timeout(stream, sender_addr, HANDSHAKE_TIMEOUT)
     }
 
@@ -46,7 +46,7 @@ impl ConnectionHandler {
         stream: &mut TcpStream,
         sender_addr: SocketAddr,
         handshake_timeout: Duration,
-    ) -> Result<String, ServerError> {
+    ) -> Result<(String, ClientToken), ServerError> {
         stream.set_read_timeout(Some(handshake_timeout))?;
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         stream.set_nodelay(true)?;
@@ -66,9 +66,9 @@ impl ConnectionHandler {
         };
 
         stream.set_read_timeout(None)?;
-        register_pending_client(&self.state, stream)?;
-        set_client_username(&self.state, sender_addr, &username)?;
-        Ok(username)
+        let token = register_pending_client(&self.state, stream)?;
+        set_client_username(&self.state, sender_addr, &token, &username)?;
+        Ok((username, token))
     }
 
     pub(crate) fn serve_authenticated(
@@ -76,11 +76,13 @@ impl ConnectionHandler {
         stream: TcpStream,
         sender_addr: SocketAddr,
         username: String,
+        token: ClientToken,
     ) -> Result<(), ServerError> {
-        let result = self.serve_authenticated_inner(stream, sender_addr, username);
+        let result = self.serve_authenticated_inner(stream, sender_addr, username, &token);
 
         if let Err(error) = &result
-            && let Err(cleanup_error) = remove_client(&self.state, sender_addr)
+            && let Err(cleanup_error) =
+                super::state::remove_client_if_current(&self.state, sender_addr, &token)
         {
             warn!(
                 error = %cleanup_error,
@@ -99,12 +101,13 @@ impl ConnectionHandler {
         stream: TcpStream,
         sender_addr: SocketAddr,
         username: String,
+        token: &ClientToken,
     ) -> Result<(), ServerError> {
         let mut reader = FrameReader::new(stream.try_clone()?);
         info!(username = ?username, phase = "handshake", "handshake completed");
 
-        if let Err(error) = self.send_message_history(sender_addr) {
-            remove_client(&self.state, sender_addr)?;
+        if let Err(error) = self.send_message_history(sender_addr, token) {
+            super::state::remove_client_if_current(&self.state, sender_addr, token)?;
             warn!(
                 error = %error,
                 error_kind = ?error_kind(&error),
@@ -116,21 +119,25 @@ impl ConnectionHandler {
                 error => Err(error),
             };
         }
-        mark_client_ready(&self.state, sender_addr)?;
+        mark_client_ready(&self.state, sender_addr, token)?;
         broadcast_presence(&self.state)?;
 
         let join_message = format!("@{} has entered the chat. Say hello!\n", username);
         info!(username = ?username, phase = "lifecycle", "client joined chat");
         record_message(&self.state, &join_message)?;
-        if let Err(error) = broadcast(&self.state, &join_message, None) {
-            warn!(
-                error = %error,
-                error_kind = ?error_kind(&error),
-                phase = "broadcast",
-                event = "join",
-                "failed to broadcast join event"
-            );
-            return Err(error);
+        match broadcast(&self.state, &join_message, None) {
+            Ok(true) => broadcast_presence(&self.state)?,
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    error_kind = ?error_kind(&error),
+                    phase = "broadcast",
+                    event = "join",
+                    "failed to broadcast join event"
+                );
+                return Err(error);
+            }
         }
 
         let result = self.read_messages(&mut reader, sender_addr, &username);
@@ -145,7 +152,7 @@ impl ConnectionHandler {
             );
         }
 
-        if let Err(error) = self.disconnect_client(sender_addr, &username) {
+        if let Err(error) = self.disconnect_client(sender_addr, &username, token) {
             warn!(
                 error = %error,
                 error_kind = ?error_kind(&error),
@@ -228,14 +235,18 @@ impl ConnectionHandler {
 
             let message = Self::format_server_message(username, &content);
             record_message(&self.state, &message)?;
-            if let Err(error) = broadcast(&self.state, &format!("{message}\n"), None) {
-                warn!(
-                    error = %error,
-                    error_kind = ?error_kind(&error),
-                    phase = "broadcast",
-                    "failed to broadcast chat message"
-                );
-                return Err(error);
+            match broadcast(&self.state, &format!("{message}\n"), None) {
+                Ok(true) => broadcast_presence(&self.state)?,
+                Ok(false) => {}
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        error_kind = ?error_kind(&error),
+                        phase = "broadcast",
+                        "failed to broadcast chat message"
+                    );
+                    return Err(error);
+                }
             }
         }
     }
@@ -253,8 +264,9 @@ impl ConnectionHandler {
         &self,
         sender_addr: SocketAddr,
         username: &str,
+        token: &ClientToken,
     ) -> Result<(), ServerError> {
-        remove_client(&self.state, sender_addr)?;
+        super::state::remove_client_if_current(&self.state, sender_addr, token)?;
 
         let leave_message = format!("{username} has left the chat\n");
         info!(username = ?username, phase = "lifecycle", "client left chat");
@@ -265,15 +277,22 @@ impl ConnectionHandler {
         Ok(())
     }
 
-    fn send_message_history(&self, sender_addr: SocketAddr) -> Result<(), ServerError> {
-        let (writer, history) = history_snapshot(&self.state, sender_addr)?;
-        let mut stream = writer
-            .lock()
-            .map_err(|_| ServerError::ClientStatePoisoned)?;
+    fn send_message_history(
+        &self,
+        sender_addr: SocketAddr,
+        token: &ClientToken,
+    ) -> Result<(), ServerError> {
+        let (writer, history) = history_snapshot(&self.state, sender_addr, token)?;
 
         for message in history {
-            stream.write_all(message.as_bytes())?;
-            stream.write_all(b"\n")?;
+            writer
+                .try_send(format!("{message}\n"))
+                .map_err(|error| match error {
+                    std::sync::mpsc::TrySendError::Full(_) => ServerError::OutboundQueueFull,
+                    std::sync::mpsc::TrySendError::Disconnected(_) => {
+                        ServerError::OutboundWriterGone
+                    }
+                })?;
         }
 
         Ok(())
@@ -433,7 +452,8 @@ mod tests {
         assert_eq!(
             handler
                 .authenticate(&mut server_stream, sender_addr)
-                .unwrap(),
+                .unwrap()
+                .0,
             "alice"
         );
         assert_eq!(usernames(&state).unwrap(), vec!["alice"]);
@@ -468,8 +488,8 @@ mod tests {
         let mut client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (server_stream, sender_addr) = listener.accept().unwrap();
         let state = new_shared_state();
-        register_client(&state, &server_stream).unwrap();
-        set_client_username(&state, sender_addr, "alice").unwrap();
+        let token = register_client(&state, &server_stream).unwrap();
+        set_client_username(&state, sender_addr, &token, "alice").unwrap();
         assert_eq!(usernames(&state).unwrap(), vec!["alice"]);
         let handler = ConnectionHandler::new(state.clone(), Duration::ZERO);
 
@@ -479,7 +499,7 @@ mod tests {
         client_stream.write_all(b"\n").unwrap();
 
         let error = handler
-            .serve_authenticated(server_stream, sender_addr, "alice".to_string())
+            .serve_authenticated(server_stream, sender_addr, "alice".to_string(), token)
             .unwrap_err();
 
         assert!(matches!(error, ServerError::MessageTooLong));
@@ -542,7 +562,7 @@ mod tests {
         let mut client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (server_stream, client_addr) = listener.accept().unwrap();
         let state = new_shared_state();
-        register_client(&state, &server_stream).unwrap();
+        let token = register_client(&state, &server_stream).unwrap();
 
         let handler = ConnectionHandler::new(state.clone(), Duration::ZERO);
         let mut reader = FrameReader::new(server_stream.try_clone().unwrap());
@@ -554,7 +574,7 @@ mod tests {
 
         assert!(matches!(error, ServerError::ReservedMessagePrefix));
 
-        let (_, history) = super::history_snapshot(&state, client_addr).unwrap();
+        let (_, history) = super::history_snapshot(&state, client_addr, &token).unwrap();
         assert!(history.is_empty());
 
         client_stream
