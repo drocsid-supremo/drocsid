@@ -115,7 +115,7 @@ impl ConnectionHandler {
         reader: &mut FrameReader<R>,
         sender_addr: SocketAddr,
     ) -> Result<String, ServerError> {
-        let username = match reader.read_frame(MAX_USERNAME_BYTES) {
+        let raw_username = match reader.read_frame(MAX_USERNAME_BYTES) {
             Ok(Some(bytes)) => match String::from_utf8(bytes) {
                 Ok(username) => username,
                 Err(_) => {
@@ -135,21 +135,19 @@ impl ConnectionHandler {
                 let _ = remove_client(&self.state, sender_addr);
                 return Err(error.into());
             }
-        }
-        .trim()
-        .to_string();
+        };
 
-        if username.is_empty() {
+        if raw_username.trim().is_empty() {
             remove_client(&self.state, sender_addr)?;
             return Err(ServerError::EmptyHandshakeUsername);
         }
 
-        if !is_valid_username(&username) {
+        if !is_valid_username(&raw_username) {
             remove_client(&self.state, sender_addr)?;
             return Err(ServerError::UsernameContainsControlCharacters);
         }
 
-        Ok(username)
+        Ok(raw_username.trim().to_string())
     }
 
     fn read_messages(
@@ -333,13 +331,20 @@ mod tests {
 
     #[test]
     fn rejects_control_characters_during_handshake() {
-        let handler = ConnectionHandler::new(new_shared_state(), Duration::ZERO);
-        let mut reader = FrameReader::new(Cursor::new(b"alice\x1b[2J\n"));
         let sender_addr: SocketAddr = "127.0.0.1:7878".parse().unwrap();
 
-        assert!(matches!(
-            handler.read_handshake_username(&mut reader, sender_addr),
-            Err(ServerError::UsernameContainsControlCharacters)
-        ));
+        for frame in [
+            b"alice\x1b[2J\n".as_slice(),
+            b"alice\r\n".as_slice(),
+            b"alice\t\n".as_slice(),
+        ] {
+            let handler = ConnectionHandler::new(new_shared_state(), Duration::ZERO);
+            let mut reader = FrameReader::new(Cursor::new(frame));
+
+            assert!(matches!(
+                handler.read_handshake_username(&mut reader, sender_addr),
+                Err(ServerError::UsernameContainsControlCharacters)
+            ));
+        }
     }
 }
