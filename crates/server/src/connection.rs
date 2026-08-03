@@ -136,6 +136,8 @@ impl ConnectionHandler {
         let result = self.read_messages(&mut reader, sender_addr, &username);
         if let Err(error) = &result {
             warn!(
+                %sender_addr,
+                username = ?username,
                 error = %error,
                 error_kind = ?error_kind(error),
                 phase = "message_read",
@@ -360,7 +362,7 @@ fn error_kind(error: &ServerError) -> Option<ErrorKind> {
 #[cfg(test)]
 mod tests {
     use std::{
-        io::{BufRead, BufReader, Cursor, Write},
+        io::{BufRead, BufReader, Cursor, Read, Write},
         net::{Shutdown, TcpListener, TcpStream},
         time::Duration,
     };
@@ -542,7 +544,7 @@ mod tests {
         let state = new_shared_state();
         register_client(&state, &server_stream).unwrap();
 
-        let handler = ConnectionHandler::new(state, Duration::ZERO);
+        let handler = ConnectionHandler::new(state.clone(), Duration::ZERO);
         let mut reader = FrameReader::new(server_stream.try_clone().unwrap());
         client_stream.write_all(b"__users__:admin\n").unwrap();
 
@@ -551,5 +553,22 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, ServerError::ReservedMessagePrefix));
+
+        let (_, history) = super::history_snapshot(&state, client_addr).unwrap();
+        assert!(history.is_empty());
+
+        client_stream
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let mut broadcast = [0; 1];
+        let read_result = client_stream.read(&mut broadcast);
+        assert!(matches!(
+            read_result,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                )
+        ));
     }
 }
