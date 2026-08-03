@@ -95,9 +95,15 @@ Observability is part of the runtime contract, not an optional debugging conveni
 
 ## Test-driven development
 
-Use test-driven development (TDD) for behavior changes and bug fixes. Start by expressing the expected behavior in a focused test, implement the smallest change that makes it pass, and then refactor while keeping the test suite green.
+Use test-driven development (TDD) for behavior changes, bug fixes, and security fixes. Follow an explicit Red-Green-Refactor cycle:
 
-Every bug fix must include a regression test that reproduces the original failure and prevents it from returning. The test should fail against the buggy behavior and pass with the fix. Keep regression tests close to the crate or module they protect, and include the relevant test command in the pull request validation.
+1. **Red:** express the expected behavior in a focused test at the correct level (unit, integration, or end-to-end), then run it and confirm that it fails for the expected behavioral reason.
+2. **Green:** implement the smallest change that makes the test pass, then run the test again and confirm that it passes.
+3. **Refactor:** improve the implementation or test structure without changing the specified behavior, while keeping the test suite green.
+
+For behavior that crosses a process, transport, or crate boundary, the Red phase must include a test covering that boundary. A lower-level unit test may supplement it but must not replace it.
+
+Every behavior change and security fix must include a focused test that specifies the expected behavior or reproduces the original failure or security violation. The test must fail against the existing behavior before the implementation and pass after it. Keep regression tests close to the crate or module they protect, and include the relevant test command in the pull request validation.
 
 ## Validation
 
