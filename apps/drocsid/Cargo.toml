@@ -7,10 +7,10 @@ repository.workspace = true
 description = "A terminal chat client and server written in Rust."
 
 [dependencies]
-drocsid-cli = { version = "0.1.3", path = "../../crates/cli" }
-drocsid-config = { version = "0.1.3", path = "../../crates/config" }
-drocsid-server = { version = "0.1.3", path = "../../crates/server" }
-drocsid-tui = { version = "0.1.3", path = "../../crates/tui" }
+drocsid-cli = { version = "0.2.0", path = "../../crates/cli" }
+drocsid-config = { version = "0.2.0", path = "../../crates/config" }
+drocsid-server = { version = "0.2.0", path = "../../crates/server" }
+drocsid-tui = { version = "0.2.0", path = "../../crates/tui" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 

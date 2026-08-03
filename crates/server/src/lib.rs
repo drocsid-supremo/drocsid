@@ -23,6 +23,7 @@ const CONNECTION_WORKER_COUNT: usize = 16;
 const PENDING_CONNECTION_QUEUE_SIZE: usize = MAX_CONNECTIONS;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ServerError {
     #[error("received an empty username during client handshake")]
     EmptyHandshakeUsername,
