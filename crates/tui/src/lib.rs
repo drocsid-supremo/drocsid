@@ -17,6 +17,7 @@ use drocsid_client::{
 use drocsid_config::ServerConfig;
 use drocsid_protocol::format_chat_message;
 use ratatui::Frame;
+use tracing::info;
 
 pub fn run_client(username: &str, server_config: &ServerConfig) -> io::Result<()> {
     if username.trim().is_empty() {
@@ -40,7 +41,7 @@ pub fn run_client(username: &str, server_config: &ServerConfig) -> io::Result<()
     })?;
 
     if let Some(exit_notice) = app.exit_notice {
-        println!("client closed: {exit_notice}");
+        info!(reason = %exit_notice, "client closed");
     }
 
     Ok(())

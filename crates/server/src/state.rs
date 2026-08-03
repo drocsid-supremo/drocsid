@@ -8,6 +8,7 @@ use std::{
 
 use crate::ServerError;
 use drocsid_protocol::build_users_event;
+use tracing::warn;
 
 const MESSAGE_HISTORY_LIMIT: usize = 100;
 pub const MAX_CONNECTIONS: usize = 256;
@@ -150,7 +151,12 @@ pub fn broadcast(
 
     for (address, mut stream) in clients {
         if let Err(error) = stream.write_all(message.as_bytes()) {
-            eprintln!("dropping client during broadcast: {error}");
+            warn!(
+                %address,
+                error = %error,
+                error_kind = ?error.kind(),
+                "dropping client during broadcast"
+            );
             remove_client(state, address)?;
         }
     }

@@ -11,6 +11,8 @@ drocsid-cli = { version = "0.1.3", path = "../../crates/cli" }
 drocsid-config = { version = "0.1.3", path = "../../crates/config" }
 drocsid-server = { version = "0.1.3", path = "../../crates/server" }
 drocsid-tui = { version = "0.1.3", path = "../../crates/tui" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [dev-dependencies.cargo-husky]
 version = "1"

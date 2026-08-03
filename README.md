@@ -100,6 +100,22 @@ Run `drocsid --help` or `drocsid <command> --help` for the complete command refe
 
 For a server running on another machine, pass its reachable address to the client with `--connect` and allow the selected TCP port through the firewall.
 
+## Observability
+
+The executable emits structured logs through `tracing`. Human-readable logs are enabled by default, and `RUST_LOG` controls the verbosity:
+
+```bash
+RUST_LOG=drocsid_server=debug,drocsid=info drocsid server
+```
+
+Set `DROCSID_LOG_FORMAT=json` when logs need to be collected or shared as newline-delimited JSON:
+
+```bash
+DROCSID_LOG_FORMAT=json RUST_LOG=drocsid_server=debug drocsid server 2> server.log
+```
+
+Connection logs include the peer address, username, error kind, and processing phase when available. Message contents are not logged by default. When reporting a problem, include the log lines around the failure together with the exact command used to start the server and client.
+
 ## Client controls
 
 | Key | Action |
