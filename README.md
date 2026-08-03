@@ -1,89 +1,71 @@
 # drocsid
 
-[![Rust](https://img.shields.io/badge/built%20with-Rust%202024-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![TUI](https://img.shields.io/badge/interface-terminal%20TUI-0f766e)](https://ratatui.rs/)
-[![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088ff?logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Status](https://img.shields.io/badge/status-experimental-f59e0b)](#limitations)
+[![CI](https://img.shields.io/github/actions/workflow/status/drocsid-supremo/drocsid/ci.yml?branch=mosquitao&label=CI)](https://github.com/drocsid-supremo/drocsid/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/built%20with-Rust-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/status-experimental-orange.svg)](#limitations)
 
-A small terminal chat application written in Rust. drocsid uses a TCP server and a lightweight terminal user interface (TUI) client built with [Ratatui](https://ratatui.rs/).
+`drocsid` is a small terminal chat application written in Rust. It provides a TCP server and an interactive terminal client built with [Ratatui](https://ratatui.rs/).
+
+The project is experimental and focuses on a simple, self-hosted chat experience with a small protocol and a modular Cargo workspace.
 
 ## Features
 
-- Dedicated TCP server and terminal client modes.
-- Multiple clients connected to the same chat session.
-- Real-time message broadcasting.
-- Connected-user list in the session sidebar.
-- Join and leave notifications.
-- In-memory message history, with the last 100 messages retained by the server.
-- User mentions with `@username` highlighting.
-- Mention autocomplete with `Tab` and selection with the arrow keys.
-- Pending-message styling until the server echoes a sent message.
-- Configurable server bind address, client connection address, and simulated latency.
-- Graceful disconnect feedback in the client interface.
+- Server and client modes in a single executable.
+- Real-time message broadcasting over TCP.
+- Connected-user presence and join/leave notifications.
+- In-memory history with the last 100 messages.
+- `@username` mentions with autocomplete.
+- Pending-message feedback until the server echoes a message.
+- Configurable bind address, server address, and simulated latency.
+- Cross-platform release artifacts for desktop platforms and Termux on Android ARM64.
 
 ## Requirements
 
-- Rust and Cargo with support for the Rust 2024 edition.
-- A terminal capable of displaying Unicode and ANSI colors.
+- Rust and Cargo with Rust 2024 edition support.
+- A terminal with Unicode and ANSI color support.
 
-Install Rust through [rustup](https://rustup.rs/) if it is not already available.
+Install Rust with [rustup](https://rustup.rs/) if necessary.
 
-To install the executable from crates.io after Rust is available:
+## Quick start
+
+Clone the repository and build the executable:
+
+```bash
+git clone https://github.com/drocsid-supremo/drocsid.git
+cd drocsid
+cargo build --package drocsid
+```
+
+Start the server in one terminal:
+
+```bash
+cargo run --package drocsid -- mode=server
+```
+
+Connect a client from another terminal:
+
+```bash
+cargo run --package drocsid -- mode=client username=alice
+```
+
+Open more clients with different usernames to test a shared chat session.
+
+The default server address is `0.0.0.0:7878`, and clients connect to `127.0.0.1:7878`.
+
+## Installation
+
+After Rust is installed, the executable can be installed from crates.io:
 
 ```bash
 cargo install drocsid
 ```
 
-## Getting started
+Tagged releases also provide prebuilt archives on the project's [GitHub Releases](https://github.com/drocsid-supremo/drocsid/releases) page.
 
-Clone the repository and enter the project directory:
+### Termux
 
-```bash
-git clone <repository-url>
-cd drocsid
-```
-
-Build the application:
-
-```bash
-cargo build -p drocsid
-```
-
-### Start the server
-
-In one terminal, run:
-
-```bash
-cargo run -p drocsid -- mode=server
-```
-
-The server listens on `0.0.0.0:7878` by default.
-
-### Connect a client
-
-In another terminal, run:
-
-```bash
-cargo run -p drocsid -- mode=client username=alice
-```
-
-Open additional terminals and connect more users by changing the username:
-
-```bash
-cargo run -p drocsid -- mode=client username=bob
-```
-
-The client connects to `127.0.0.1:7878` by default.
-
-### Termux / Android
-
-Each tagged GitHub Release includes an Android ARM64 archive for Termux:
-
-```text
-drocsid-vX.Y.Z-android-arm64.tar.gz
-```
-
-On an ARM64 Android device with Termux, download the archive from the project's GitHub Release and run:
+The Android ARM64 archive can be used from Termux:
 
 ```bash
 pkg install tar
@@ -92,33 +74,30 @@ chmod +x drocsid
 ./drocsid mode=client username=alice
 ```
 
-The Android artifact targets `aarch64-linux-android`, so it is built against the Android runtime rather than the standard Linux runtime. Termux ARM64 is supported by the release artifact; other Android architectures are not currently published.
+The published Android artifact targets `aarch64-linux-android`. Other Android architectures are not currently published.
 
-## Command-line arguments
+## Command-line interface
 
-The application uses `key=value` arguments:
+Arguments use the `key=value` format:
 
 | Argument | Required | Description |
 | --- | --- | --- |
-| `mode=server` | Yes | Starts the TCP chat server. |
-| `mode=client` | Yes | Starts the terminal chat client. |
+| `mode=server` | Yes | Starts the TCP server. |
+| `mode=client` | Yes | Starts the terminal client. |
 | `username=<name>` | Client only | Sets the username sent during the client handshake. |
 
 Examples:
 
 ```bash
-# Server
-cargo run -p drocsid -- mode=server
-
-# Client
-cargo run -p drocsid -- mode=client username=alice
+drocsid mode=server
+drocsid mode=client username=alice
 ```
 
-An unknown mode or a client without a non-empty username causes the application to exit with an error.
+The application rejects unknown modes and blank client usernames.
 
 ## Configuration
 
-Configuration is loaded from environment variables. You can copy the example file and adjust it for your environment:
+Configuration is read from environment variables. To create a local configuration file:
 
 ```bash
 cp .env.example .env
@@ -126,11 +105,11 @@ cp .env.example .env
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `SERVER_BIND_ADDR` | `0.0.0.0:7878` | Local address and port used by the server to accept connections. |
-| `SERVER_CONNECT_ADDR` | `127.0.0.1:7878` | Address and port used by clients to connect to the server. |
-| `SERVER_SIMULATED_LATENCY_MS` | `0` | Artificial delay, in milliseconds, applied by the server before broadcasting received messages. Invalid values fall back to `0`. |
+| `SERVER_BIND_ADDR` | `0.0.0.0:7878` | Address and port where the server accepts connections. |
+| `SERVER_CONNECT_ADDR` | `127.0.0.1:7878` | Address and port used by clients to connect. |
+| `SERVER_SIMULATED_LATENCY_MS` | `0` | Artificial server delay before broadcasting messages. |
 
-For a server running on another machine, set `SERVER_CONNECT_ADDR` to that machine's reachable address in the client's `.env` file. Make sure the selected TCP port is allowed by the host firewall.
+For a server running on another machine, set `SERVER_CONNECT_ADDR` to its reachable address and allow the selected TCP port through the firewall.
 
 ## Client controls
 
@@ -138,29 +117,42 @@ For a server running on another machine, set `SERVER_CONNECT_ADDR` to that machi
 | --- | --- |
 | `Enter` | Send the current message. |
 | `Tab` | Apply the selected mention suggestion. |
-| `Up` / `Down` | Move through mention suggestions. |
-| `Backspace` | Remove the previous character. |
+| `Up` / `Down` | Navigate mention suggestions. |
+| `Backspace` | Delete the previous character. |
 | `Esc` | Quit the client. |
 | `Ctrl+Q` | Force quit the client. |
-| `Enter` after a disconnect | Close the disconnect notice. |
 
-To mention another connected user, type `@` at the beginning of a word. For example:
+Type `@` at the beginning of a word to mention another connected user:
 
 ```text
 @alice are you available?
 ```
 
-The client highlights messages that mention the current user's exact username. Partial matches such as `@alice1` do not trigger a highlight for `alice`.
+## Architecture
+
+The repository is a Cargo workspace organized by responsibility:
+
+| Component | Responsibility |
+| --- | --- |
+| `apps/drocsid` | Application composition and executable entry point. |
+| `crates/cli` | Startup argument parsing and validation. |
+| `crates/config` | Shared connection configuration and defaults. |
+| `crates/protocol` | Message, presence, and mention protocol helpers. |
+| `crates/client` | TCP client connection and chat state. |
+| `crates/server` | TCP listener, sessions, broadcasting, and history. |
+| `crates/tui` | Ratatui interface and terminal input handling. |
+
+The client and server communicate through a newline-delimited protocol over a plain TCP stream.
 
 ## Development
 
-Format the code:
+Format the workspace:
 
 ```bash
 cargo fmt --all
 ```
 
-Run the full local verification suite:
+Run the complete local verification suite:
 
 ```bash
 cargo fmt --all -- --check
@@ -169,37 +161,26 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
 ```
 
-These checks are also executed by the GitHub Actions workflow in `.github/workflows/ci.yml`.
+The same checks run in [GitHub Actions](https://github.com/drocsid-supremo/drocsid/actions/workflows/ci.yml).
 
 ## Releases
 
-Releases are managed by [release-plz](https://release-plz.dev/). After changes reach the `mosquitao` branch, release-plz creates or updates a release pull request with the required Cargo version changes. Merging that pull request publishes the workspace crates and creates a `vX.Y.Z` tag for the executable package.
+Releases are managed by [release-plz](https://release-plz.dev/):
 
-The tag starts the multiplatform release workflow, which builds the `drocsid` executable for Windows, macOS, Linux, and Android/Termux and attaches the archives to the GitHub Release. The `CARGO_REGISTRY_TOKEN` secret is required by GitHub Actions to publish to crates.io.
+1. Changes are merged into `mosquitao` through pull requests.
+2. release-plz creates or updates a release pull request with the required version changes.
+3. Merging the release pull request publishes the workspace crates and creates a `vX.Y.Z` tag.
+4. The tag starts the multiplatform binary release workflow.
 
-## Architecture
-
-The application is organized as a Cargo workspace with focused crates:
-
-- `apps/drocsid`: composes the application and provides the executable.
-- `crates/cli`: parses startup arguments and commands.
-- `crates/config`: owns shared server connection configuration.
-- `crates/server`: accepts TCP connections, tracks clients, broadcasts messages, and keeps in-memory history.
-- `crates/client`: manages the TCP connection and client application state.
-- `crates/tui`: renders the interactive Ratatui interface and handles terminal input.
-- `crates/protocol`: contains the text protocol helpers for chat messages, user-presence events, and mentions.
-
-The server and client communicate over a plain TCP stream. Chat messages and presence events are newline-delimited.
+Release automation requires the `CARGO_REGISTRY_TOKEN` GitHub Actions secret.
 
 ## Limitations
 
-This project is currently experimental. In particular:
-
+- The project is experimental and does not promise protocol compatibility yet.
 - There is no authentication or authorization.
-- Traffic is not encrypted; do not use it for sensitive conversations.
-- Message history is held only in memory and is lost when the server stops.
-- There is no persistent account or room management.
-- The protocol is intentionally small and does not provide an API compatibility guarantee.
+- Traffic is unencrypted; do not use it for sensitive conversations.
+- Message history exists only in memory and is lost when the server stops.
+- There is no persistent account, room, or message management.
 
 ## License
 
