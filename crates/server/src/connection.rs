@@ -7,7 +7,7 @@ use std::{
 
 use crate::ServerError;
 use chrono::Local;
-use drocsid_protocol::{format_chat_message, is_valid_username};
+use drocsid_protocol::{USERS_EVENT_PREFIX, format_chat_message, is_valid_username};
 use tracing::{debug, info, warn};
 
 use super::state::{
@@ -212,6 +212,10 @@ impl ConnectionHandler {
 
             if content.trim().is_empty() {
                 continue;
+            }
+
+            if content.starts_with(USERS_EVENT_PREFIX) {
+                return Err(ServerError::ReservedMessagePrefix);
             }
 
             allow_message(&self.state, sender_addr)?;
@@ -528,5 +532,24 @@ mod tests {
         assert_eq!(content, "[alice](10:25): forged author");
         assert_eq!(timestamp.len(), 5);
         assert_eq!(timestamp.as_bytes()[2], b':');
+    }
+
+    #[test]
+    fn rejects_messages_that_use_the_presence_event_prefix() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_stream, client_addr) = listener.accept().unwrap();
+        let state = new_shared_state();
+        register_client(&state, &server_stream).unwrap();
+
+        let handler = ConnectionHandler::new(state, Duration::ZERO);
+        let mut reader = FrameReader::new(server_stream.try_clone().unwrap());
+        client_stream.write_all(b"__users__:admin\n").unwrap();
+
+        let error = handler
+            .read_messages(&mut reader, client_addr, "attacker")
+            .unwrap_err();
+
+        assert!(matches!(error, ServerError::ReservedMessagePrefix));
     }
 }
