@@ -11,9 +11,8 @@ use drocsid_protocol::{format_chat_message, is_valid_username};
 use tracing::{debug, info, warn};
 
 use super::state::{
-    ServerStateHandle, allow_message, broadcast, broadcast_presence, client_writer,
-    mark_client_ready, message_history, record_message, register_pending_client, remove_client,
-    set_client_username,
+    ServerStateHandle, allow_message, broadcast, broadcast_presence, history_snapshot,
+    mark_client_ready, record_message, register_pending_client, remove_client, set_client_username,
 };
 
 const MAX_MESSAGE_BYTES: usize = 4 * 1024;
@@ -261,12 +260,12 @@ impl ConnectionHandler {
     }
 
     fn send_message_history(&self, sender_addr: SocketAddr) -> Result<(), ServerError> {
-        let writer = client_writer(&self.state, sender_addr)?;
+        let (writer, history) = history_snapshot(&self.state, sender_addr)?;
         let mut stream = writer
             .lock()
             .map_err(|_| ServerError::ClientStatePoisoned)?;
 
-        for message in message_history(&self.state)? {
+        for message in history {
             stream.write_all(message.as_bytes())?;
             stream.write_all(b"\n")?;
         }

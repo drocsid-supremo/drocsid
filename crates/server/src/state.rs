@@ -29,13 +29,14 @@ struct RateLimitState {
     last_refill: Instant,
 }
 
-pub type ClientWriter = Arc<Mutex<TcpStream>>;
+pub(crate) type ClientWriter = Arc<Mutex<TcpStream>>;
 
 struct ClientEntry {
     addr: SocketAddr,
     writer: ClientWriter,
     username: Option<String>,
     ready: bool,
+    pending_messages: Vec<String>,
 }
 
 impl ServerState {
@@ -53,11 +54,14 @@ pub fn new_shared_state() -> ServerStateHandle {
 }
 
 #[cfg(test)]
-pub fn register_client(state: &ServerStateHandle, stream: &TcpStream) -> Result<(), ServerError> {
+pub(crate) fn register_client(
+    state: &ServerStateHandle,
+    stream: &TcpStream,
+) -> Result<(), ServerError> {
     register_client_with_status(state, stream, true)
 }
 
-pub fn register_pending_client(
+pub(crate) fn register_pending_client(
     state: &ServerStateHandle,
     stream: &TcpStream,
 ) -> Result<(), ServerError> {
@@ -88,38 +92,58 @@ fn register_client_with_status(
         writer: Arc::new(Mutex::new(stream.try_clone()?)),
         username: None,
         ready,
+        pending_messages: Vec::new(),
     });
     Ok(())
 }
 
-pub fn mark_client_ready(
+pub(crate) fn mark_client_ready(
     state: &ServerStateHandle,
     target_addr: SocketAddr,
 ) -> Result<(), ServerError> {
-    let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
+    let writer = {
+        let state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
+        state
+            .clients
+            .iter()
+            .find(|client| client.addr == target_addr)
+            .map(|client| Arc::clone(&client.writer))
+            .ok_or(ServerError::ClientStatePoisoned)?
+    };
 
-    if let Some(client) = state
-        .clients
-        .iter_mut()
-        .find(|client| client.addr == target_addr)
-    {
+    let mut stream = writer
+        .lock()
+        .map_err(|_| ServerError::ClientStatePoisoned)?;
+    let pending_messages = {
+        let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
+
+        let client = state
+            .clients
+            .iter_mut()
+            .find(|client| client.addr == target_addr)
+            .ok_or(ServerError::ClientStatePoisoned)?;
         client.ready = true;
+        std::mem::take(&mut client.pending_messages)
+    };
+
+    for message in pending_messages {
+        stream.write_all(message.as_bytes())?;
     }
 
     Ok(())
 }
 
-pub fn client_writer(
+pub(crate) fn history_snapshot(
     state: &ServerStateHandle,
     target_addr: SocketAddr,
-) -> Result<ClientWriter, ServerError> {
+) -> Result<(ClientWriter, Vec<String>), ServerError> {
     let state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
 
     state
         .clients
         .iter()
         .find(|client| client.addr == target_addr)
-        .map(|client| Arc::clone(&client.writer))
+        .map(|client| (Arc::clone(&client.writer), state.history.clone()))
         .ok_or(ServerError::ClientStatePoisoned)
 }
 
@@ -185,20 +209,28 @@ pub fn set_client_username(
     Ok(())
 }
 
-pub fn broadcast(
+pub(crate) fn broadcast(
     state: &ServerStateHandle,
     message: &str,
     exclude_addr: Option<SocketAddr>,
 ) -> Result<(), ServerError> {
     let clients = {
-        let state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
-        state
-            .clients
-            .iter()
-            .filter(|client| client.ready)
-            .filter(|client| exclude_addr.is_none_or(|addr| client.addr != addr))
-            .map(|client| Ok((client.addr, Arc::clone(&client.writer))))
-            .collect::<Result<Vec<_>, std::io::Error>>()?
+        let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
+        let mut clients = Vec::new();
+
+        for client in &mut state.clients {
+            if exclude_addr.is_some_and(|addr| client.addr == addr) {
+                continue;
+            }
+
+            if client.ready {
+                clients.push((client.addr, Arc::clone(&client.writer)));
+            } else {
+                client.pending_messages.push(message.to_string());
+            }
+        }
+
+        clients
     };
 
     for (address, writer) in clients {
@@ -233,11 +265,6 @@ pub fn broadcast_presence(state: &ServerStateHandle) -> Result<(), ServerError> 
     broadcast(state, &build_users_event(&users), None)
 }
 
-pub fn message_history(state: &ServerStateHandle) -> Result<Vec<String>, ServerError> {
-    let state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
-    Ok(state.history.clone())
-}
-
 pub fn record_message(state: &ServerStateHandle, message: &str) -> Result<(), ServerError> {
     let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
     state
@@ -257,11 +284,12 @@ mod tests {
     use std::{
         io::{BufRead, BufReader, Read, Write},
         net::{TcpListener, TcpStream},
+        thread,
         time::Duration,
     };
 
     use super::{
-        broadcast, client_writer, mark_client_ready, new_shared_state, register_pending_client,
+        broadcast, history_snapshot, mark_client_ready, new_shared_state, register_pending_client,
     };
 
     #[test]
@@ -272,7 +300,13 @@ mod tests {
         let state = new_shared_state();
 
         register_pending_client(&state, &server_stream).unwrap();
-        broadcast(&state, "live before history\n", None).unwrap();
+        let (writer, _) = history_snapshot(&state, client_addr).unwrap();
+        let replay_writer = writer.lock().unwrap();
+        let broadcast_state = state.clone();
+        let broadcast_thread = thread::spawn(move || {
+            broadcast(&broadcast_state, "live during history\n", None).unwrap();
+        });
+        broadcast_thread.join().unwrap();
 
         client_stream
             .set_read_timeout(Some(Duration::from_millis(50)))
@@ -280,10 +314,9 @@ mod tests {
         let mut unexpected = [0; 1];
         assert!(client_stream.read(&mut unexpected).is_err());
 
-        let writer = client_writer(&state, client_addr).unwrap();
-        writer.lock().unwrap().write_all(b"history\n").unwrap();
+        (&*replay_writer).write_all(b"history\n").unwrap();
+        drop(replay_writer);
         mark_client_ready(&state, client_addr).unwrap();
-        broadcast(&state, "live after history\n", None).unwrap();
 
         client_stream
             .set_read_timeout(Some(Duration::from_secs(1)))
@@ -296,6 +329,6 @@ mod tests {
             lines.push(line);
         }
 
-        assert_eq!(lines, ["history\n", "live after history\n"]);
+        assert_eq!(lines, ["history\n", "live during history\n"]);
     }
 }
