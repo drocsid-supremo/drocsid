@@ -15,7 +15,6 @@ use super::state::{
 const MAX_MESSAGE_BYTES: usize = 4 * 1024;
 const MAX_USERNAME_BYTES: usize = 32;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct ConnectionHandler {
     state: ServerStateHandle,
@@ -33,11 +32,14 @@ impl ConnectionHandler {
     pub fn serve(&self, mut stream: TcpStream) -> Result<(), ServerError> {
         let sender_addr = stream.peer_addr()?;
         stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
-        stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         stream.set_nodelay(true)?;
 
+        let username = {
+            let mut handshake_reader = FrameReader::new(stream.try_clone()?);
+            self.read_handshake_username(&mut handshake_reader, sender_addr)?
+        };
+        stream.set_read_timeout(None)?;
         let mut reader = FrameReader::new(stream.try_clone()?);
-        let username = self.read_handshake_username(&mut reader, sender_addr)?;
 
         set_client_username(&self.state, sender_addr, &username)?;
         self.send_message_history(&mut stream)?;
