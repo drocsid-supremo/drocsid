@@ -360,7 +360,7 @@ mod tests {
     use super::{ConnectionHandler, FrameError, FrameReader};
     use crate::{
         ServerError,
-        state::{new_shared_state, register_client, usernames},
+        state::{new_shared_state, register_client, set_client_username, usernames},
     };
 
     #[test]
@@ -457,6 +457,8 @@ mod tests {
         let (server_stream, sender_addr) = listener.accept().unwrap();
         let state = new_shared_state();
         register_client(&state, &server_stream).unwrap();
+        set_client_username(&state, sender_addr, "alice").unwrap();
+        assert_eq!(usernames(&state).unwrap(), vec!["alice"]);
         let handler = ConnectionHandler::new(state.clone(), Duration::ZERO);
 
         client_stream
