@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -37,6 +38,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.name }}
+    if: github.event_name == 'push'
     needs: validate
     runs-on: ${{ matrix.runner }}
 
@@ -172,16 +174,31 @@ jobs:
         run: |
           set -euo pipefail
 
-          cargo publish --locked --package drocsid-protocol
-          cargo publish --locked --package drocsid-config
-          cargo publish --locked --package drocsid-cli
-          cargo publish --locked --package drocsid-client
-          cargo publish --locked --package drocsid-server
-          cargo publish --locked --package drocsid-tui
-          cargo publish --locked --package drocsid
+          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "drocsid") | .version')"
+
+          publish_crate() {
+            local package_name="$1"
+
+            if curl --fail --silent --show-error --location \
+              "https://crates.io/api/v1/crates/${package_name}/${package_version}" \
+              > /dev/null; then
+              echo "Skipping ${package_name} v${package_version}: already published"
+            else
+              cargo publish --locked --package "${package_name}"
+            fi
+          }
+
+          publish_crate drocsid-protocol
+          publish_crate drocsid-config
+          publish_crate drocsid-cli
+          publish_crate drocsid-client
+          publish_crate drocsid-server
+          publish_crate drocsid-tui
+          publish_crate drocsid
 
   publish:
     name: Publish GitHub Release
+    if: github.event_name == 'push' && needs.build.result == 'success' && needs.publish-crates.result == 'success'
     needs:
       - build
       - publish-crates
