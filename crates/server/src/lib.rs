@@ -2,7 +2,7 @@ mod connection;
 mod state;
 
 use std::{
-    net::{TcpListener, ToSocketAddrs},
+    net::{IpAddr, TcpListener},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -55,10 +55,11 @@ pub enum ServerError {
 
 pub fn run_server(server_config: &ServerConfig) -> Result<(), ServerError> {
     let listener = TcpListener::bind(&server_config.bind_addr)?;
+    let bound_addr = listener.local_addr()?;
 
-    if bind_is_not_loopback(&server_config.bind_addr) {
+    if bind_is_not_loopback(bound_addr.ip()) {
         warn!(
-            bind_addr = %server_config.bind_addr,
+            bind_addr = %bound_addr,
             phase = "startup",
             "server is listening beyond localhost; traffic is unauthenticated and unencrypted"
         );
@@ -115,11 +116,8 @@ pub fn run_server(server_config: &ServerConfig) -> Result<(), ServerError> {
     Ok(())
 }
 
-fn bind_is_not_loopback(bind_addr: &str) -> bool {
-    bind_addr
-        .to_socket_addrs()
-        .map(|mut addresses| addresses.any(|address| !address.ip().is_loopback()))
-        .unwrap_or(false)
+fn bind_is_not_loopback(ip: IpAddr) -> bool {
+    !ip.is_loopback()
 }
 
 fn spawn_connection_worker(
@@ -192,10 +190,9 @@ mod tests {
 
     #[test]
     fn recognizes_non_loopback_bind_addresses() {
-        assert!(!bind_is_not_loopback("127.0.0.1:7878"));
-        assert!(!bind_is_not_loopback("[::1]:7878"));
-        assert!(!bind_is_not_loopback("localhost:7878"));
-        assert!(bind_is_not_loopback("0.0.0.0:7878"));
-        assert!(bind_is_not_loopback("[::]:7878"));
+        assert!(!bind_is_not_loopback("127.0.0.1".parse().unwrap()));
+        assert!(!bind_is_not_loopback("::1".parse().unwrap()));
+        assert!(bind_is_not_loopback("0.0.0.0".parse().unwrap()));
+        assert!(bind_is_not_loopback("::".parse().unwrap()));
     }
 }
