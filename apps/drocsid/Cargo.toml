@@ -8,10 +8,10 @@ description = "A terminal chat client and server written in Rust."
 
 [dependencies]
 dotenvy = "0.15"
-drocsid-cli = { version = "0.1.3", path = "../../crates/cli" }
-drocsid-config = { version = "0.1.3", path = "../../crates/config" }
-drocsid-server = { version = "0.1.3", path = "../../crates/server" }
-drocsid-tui = { version = "0.1.3", path = "../../crates/tui" }
+drocsid-cli = { version = "0.2.0", path = "../../crates/cli" }
+drocsid-config = { version = "0.2.0", path = "../../crates/config" }
+drocsid-server = { version = "0.2.0", path = "../../crates/server" }
+drocsid-tui = { version = "0.2.0", path = "../../crates/tui" }
 
 [dev-dependencies.cargo-husky]
 version = "1"
