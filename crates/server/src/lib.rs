@@ -40,6 +40,8 @@ pub enum ServerError {
     ConnectionLimitReached,
     #[error("message rate limit exceeded")]
     MessageRateLimitExceeded,
+    #[error("client outbound queue is full")]
+    OutboundQueueFull,
     #[error("shared client state is poisoned")]
     ClientStatePoisoned,
     #[error("io error: {0}")]
@@ -125,8 +127,8 @@ fn spawn_connection_worker(
             let connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
             let handler = ConnectionHandler::new(Arc::clone(&state), simulated_latency);
             let mut stream = stream;
-            let username = match handler.authenticate(&mut stream, peer_addr) {
-                Ok(username) => username,
+            let (username, token) = match handler.authenticate(&mut stream, peer_addr) {
+                Ok(session) => session,
                 Err(error) => {
                     debug!(
                         %peer_addr,
@@ -142,7 +144,8 @@ fn spawn_connection_worker(
             thread::spawn(move || {
                 let _connection_span =
                     info_span!("connection", connection_id, peer_addr = %peer_addr).entered();
-                if let Err(error) = handler.serve_authenticated(stream, peer_addr, username) {
+                if let Err(error) = handler.serve_authenticated(stream, peer_addr, username, token)
+                {
                     error!(
                         error = %error,
                         error_kind = ?error_kind(&error),
