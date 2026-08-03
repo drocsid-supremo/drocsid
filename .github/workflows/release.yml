@@ -179,9 +179,8 @@ jobs:
           publish_crate() {
             local package_name="$1"
 
-            if curl --fail --silent --show-error --location \
-              "https://crates.io/api/v1/crates/${package_name}/${package_version}" \
-              > /dev/null; then
+            if cargo info --registry crates-io "${package_name}@${package_version}" \
+              > /dev/null 2>&1; then
               echo "Skipping ${package_name} v${package_version}: already published"
             else
               cargo publish --locked --package "${package_name}"
