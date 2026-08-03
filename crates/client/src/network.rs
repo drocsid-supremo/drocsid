@@ -20,6 +20,8 @@ pub enum NetworkEvent {
 
 pub struct ClientConnection {
     stream: TcpStream,
+    server_addr: String,
+    username: String,
 }
 
 impl ClientConnection {
@@ -33,6 +35,7 @@ impl ClientConnection {
             Err(error) => {
                 warn!(
                     server_addr = %server_config.connect_addr,
+                    username = %username,
                     error = %error,
                     error_kind = ?error.kind(),
                     phase = "connect",
@@ -53,17 +56,36 @@ impl ClientConnection {
             );
             return Err(error);
         }
-        debug!(server_addr = %server_config.connect_addr, "client handshake sent");
+        debug!(
+            server_addr = %server_config.connect_addr,
+            username = %username,
+            phase = "handshake",
+            "client handshake sent"
+        );
 
         let (tx, rx) = mpsc::channel();
-        spawn_reader(reader_stream, tx);
+        spawn_reader(
+            reader_stream,
+            tx,
+            server_config.connect_addr.clone(),
+            username.to_string(),
+        );
 
-        Ok((Self { stream }, rx))
+        Ok((
+            Self {
+                stream,
+                server_addr: server_config.connect_addr.clone(),
+                username: username.to_string(),
+            },
+            rx,
+        ))
     }
 
     pub fn send_message(&mut self, message: &str) -> std::io::Result<()> {
         if let Err(error) = self.stream.write_all(format!("{message}\n").as_bytes()) {
             warn!(
+                server_addr = %self.server_addr,
+                username = %self.username,
                 error = %error,
                 error_kind = ?error.kind(),
                 phase = "message_send",
@@ -83,7 +105,12 @@ impl ClientConnection {
     }
 }
 
-fn spawn_reader(mut reader_stream: TcpStream, tx: Sender<NetworkEvent>) {
+fn spawn_reader(
+    mut reader_stream: TcpStream,
+    tx: Sender<NetworkEvent>,
+    server_addr: String,
+    username: String,
+) {
     thread::spawn(move || {
         let mut buffer = [0; 1024];
         let mut pending = Vec::new();
@@ -92,7 +119,14 @@ fn spawn_reader(mut reader_stream: TcpStream, tx: Sender<NetworkEvent>) {
             let bytes = match reader_stream.read(&mut buffer) {
                 Ok(bytes) => bytes,
                 Err(error) => {
-                    warn!(error = %error, error_kind = ?error.kind(), "client read failed");
+                    warn!(
+                        server_addr = %server_addr,
+                        username = %username,
+                        error = %error,
+                        error_kind = ?error.kind(),
+                        phase = "message_read",
+                        "client read failed"
+                    );
                     let _ = tx.send(NetworkEvent::Disconnected(format!(
                         "connection error: {error}"
                     )));
@@ -101,7 +135,12 @@ fn spawn_reader(mut reader_stream: TcpStream, tx: Sender<NetworkEvent>) {
             };
 
             if bytes == 0 {
-                debug!("server closed client connection");
+                debug!(
+                    server_addr = %server_addr,
+                    username = %username,
+                    phase = "disconnect",
+                    "server closed client connection"
+                );
                 if !pending.is_empty() {
                     let _ = tx.send(NetworkEvent::Message(
                         String::from_utf8_lossy(&pending)
