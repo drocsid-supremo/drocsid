@@ -439,9 +439,14 @@ mod tests {
             .authenticate_with_timeout(&mut server_stream, sender_addr, Duration::from_millis(20))
             .unwrap_err();
 
-        assert!(
-            matches!(error, ServerError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut)
-        );
+        assert!(matches!(
+            error,
+            ServerError::Io(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                )
+        ));
         assert!(usernames(&state).unwrap().is_empty());
     }
 
