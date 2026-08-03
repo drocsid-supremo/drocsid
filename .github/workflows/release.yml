@@ -104,6 +104,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -159,7 +161,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}-${{ matrix.architecture }}
-          path: ${{ runner.temp }}/drocsid-${{ github.ref_name }}-${{ matrix.platform }}-${{ matrix.architecture }}.${{ matrix.archive_extension }}
+          path: ${{ runner.temp }}/drocsid-${{ inputs.tag || github.ref_name }}-${{ matrix.platform }}-${{ matrix.architecture }}.${{ matrix.archive_extension }}
           if-no-files-found: error
           retention-days: 1
 
