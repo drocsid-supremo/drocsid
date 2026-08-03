@@ -93,6 +93,12 @@ Observability is part of the runtime contract, not an optional debugging conveni
 - Do not log message contents, credentials, tokens, or other sensitive payloads by default.
 - When reporting a bug, preserve the exact command, relevant `RUST_LOG` value, and the JSON log lines around the failure.
 
+## Test-driven development
+
+Use test-driven development (TDD) for behavior changes and bug fixes. Start by expressing the expected behavior in a focused test, implement the smallest change that makes it pass, and then refactor while keeping the test suite green.
+
+Every bug fix must include a regression test that reproduces the original failure and prevents it from returning. The test should fail against the buggy behavior and pass with the fix. Keep regression tests close to the crate or module they protect, and include the relevant test command in the pull request validation.
+
 ## Validation
 
 Run the narrowest relevant checks during development. Before merging workspace changes, run:
