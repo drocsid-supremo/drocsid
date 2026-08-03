@@ -2,7 +2,7 @@ mod connection;
 mod state;
 
 use std::{
-    net::TcpListener,
+    net::{IpAddr, TcpListener},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -55,6 +55,16 @@ pub enum ServerError {
 
 pub fn run_server(server_config: &ServerConfig) -> Result<(), ServerError> {
     let listener = TcpListener::bind(&server_config.bind_addr)?;
+    let bound_addr = listener.local_addr()?;
+
+    if bind_is_not_loopback(bound_addr.ip()) {
+        warn!(
+            bind_addr = %bound_addr,
+            phase = "startup",
+            "server is listening beyond localhost; traffic is unauthenticated and unencrypted"
+        );
+    }
+
     let state = new_shared_state();
     info!(
         bind_addr = %server_config.bind_addr,
@@ -104,6 +114,10 @@ pub fn run_server(server_config: &ServerConfig) -> Result<(), ServerError> {
     }
 
     Ok(())
+}
+
+fn bind_is_not_loopback(ip: IpAddr) -> bool {
+    !ip.is_loopback()
 }
 
 fn spawn_connection_worker(
@@ -167,5 +181,18 @@ fn error_kind(error: &ServerError) -> Option<std::io::ErrorKind> {
     match error {
         ServerError::Io(error) => Some(error.kind()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bind_is_not_loopback;
+
+    #[test]
+    fn recognizes_non_loopback_bind_addresses() {
+        assert!(!bind_is_not_loopback("127.0.0.1".parse().unwrap()));
+        assert!(!bind_is_not_loopback("::1".parse().unwrap()));
+        assert!(bind_is_not_loopback("0.0.0.0".parse().unwrap()));
+        assert!(bind_is_not_loopback("::".parse().unwrap()));
     }
 }

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-pub const DEFAULT_SERVER_BIND_ADDR: &str = "0.0.0.0:7878";
+pub const DEFAULT_SERVER_BIND_ADDR: &str = "127.0.0.1:7878";
 pub const DEFAULT_SERVER_CONNECT_ADDR: &str = "127.0.0.1:7878";
 pub const DEFAULT_SERVER_SIMULATED_LATENCY_MS: u64 = 0;
 
@@ -41,7 +41,7 @@ mod tests {
     fn default_server_config_values_are_stable() {
         let config = ServerConfig::for_server(None, None);
 
-        assert_eq!(config.bind_addr, "0.0.0.0:7878");
+        assert_eq!(config.bind_addr, "127.0.0.1:7878");
         assert_eq!(config.connect_addr, "127.0.0.1:7878");
         assert_eq!(config.simulated_latency, Duration::from_millis(0));
     }
