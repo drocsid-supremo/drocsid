@@ -1,6 +1,5 @@
 [workspace]
 repo_url = "https://github.com/drocsid-supremo/drocsid"
-release_always = false
 changelog_update = false
 git_tag_enable = false
 git_release_enable = false
