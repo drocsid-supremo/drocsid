@@ -1,7 +1,7 @@
 use std::{
     io::{ErrorKind, Read, Write},
     net::TcpStream,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::mpsc::{self, Receiver, SyncSender},
     thread,
 };
 
@@ -11,6 +11,7 @@ use tracing::{debug, info, warn};
 
 const MAX_CHAT_FRAME_BYTES: usize = 4 * 1024;
 const MAX_PRESENCE_FRAME_BYTES: usize = 16 * 1024;
+const NETWORK_EVENT_CAPACITY: usize = 256;
 
 pub enum NetworkEvent {
     Message(String),
@@ -63,7 +64,7 @@ impl ClientConnection {
             "client handshake sent"
         );
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(NETWORK_EVENT_CAPACITY);
         spawn_reader(
             reader_stream,
             tx,
@@ -107,7 +108,7 @@ impl ClientConnection {
 
 fn spawn_reader(
     mut reader_stream: TcpStream,
-    tx: Sender<NetworkEvent>,
+    tx: SyncSender<NetworkEvent>,
     server_addr: String,
     username: String,
 ) {
@@ -164,7 +165,7 @@ fn spawn_reader(
     });
 }
 
-fn process_pending_frames(pending: &mut Vec<u8>, tx: &Sender<NetworkEvent>) -> bool {
+fn process_pending_frames(pending: &mut Vec<u8>, tx: &SyncSender<NetworkEvent>) -> bool {
     while let Some(newline_index) = pending.iter().position(|byte| *byte == b'\n') {
         if newline_index > max_frame_bytes(&pending[..newline_index]) {
             let _ = tx.send(NetworkEvent::Disconnected(
@@ -209,11 +210,14 @@ fn max_frame_bytes(frame: &[u8]) -> usize {
 mod tests {
     use std::sync::mpsc;
 
-    use super::{MAX_CHAT_FRAME_BYTES, NetworkEvent, USERS_EVENT_PREFIX, process_pending_frames};
+    use super::{
+        MAX_CHAT_FRAME_BYTES, NETWORK_EVENT_CAPACITY, NetworkEvent, USERS_EVENT_PREFIX,
+        process_pending_frames,
+    };
 
     #[test]
     fn rejects_an_oversized_frame_without_a_newline() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(NETWORK_EVENT_CAPACITY);
         let mut pending = vec![b'x'; MAX_CHAT_FRAME_BYTES + 1];
 
         assert!(!process_pending_frames(&mut pending, &tx));
@@ -225,7 +229,7 @@ mod tests {
 
     #[test]
     fn rejects_an_oversized_delimited_frame() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(NETWORK_EVENT_CAPACITY);
         let mut pending = format!("{}\n", "x".repeat(MAX_CHAT_FRAME_BYTES + 1)).into_bytes();
 
         assert!(!process_pending_frames(&mut pending, &tx));
@@ -237,7 +241,7 @@ mod tests {
 
     #[test]
     fn accepts_a_presence_frame_larger_than_the_chat_limit() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(NETWORK_EVENT_CAPACITY);
         let mut pending =
             format!("{USERS_EVENT_PREFIX}{}\n", "x".repeat(MAX_CHAT_FRAME_BYTES)).into_bytes();
 
@@ -247,7 +251,7 @@ mod tests {
 
     #[test]
     fn counts_frame_bytes_before_decoding_split_utf8() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(NETWORK_EVENT_CAPACITY);
         let mut frame = vec![b'x'; MAX_CHAT_FRAME_BYTES - 3];
         frame.extend_from_slice("€".as_bytes());
         frame.push(b'\n');
@@ -261,5 +265,21 @@ mod tests {
             rx.recv().unwrap(),
             NetworkEvent::Message(message) if message.len() == MAX_CHAT_FRAME_BYTES
         ));
+    }
+
+    #[test]
+    fn event_channel_is_bounded() {
+        let (tx, rx) = mpsc::sync_channel(NETWORK_EVENT_CAPACITY);
+
+        for _ in 0..NETWORK_EVENT_CAPACITY {
+            tx.try_send(NetworkEvent::Message("message".to_string()))
+                .unwrap();
+        }
+
+        assert!(matches!(
+            tx.try_send(NetworkEvent::Message("overflow".to_string())),
+            Err(mpsc::TrySendError::Full(_))
+        ));
+        drop(rx);
     }
 }
