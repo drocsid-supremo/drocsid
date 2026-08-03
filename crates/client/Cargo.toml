@@ -1,8 +1,11 @@
 [package]
 name = "drocsid-client"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "TCP client state and networking for drocsid."
 
 [dependencies]
-drocsid-config = { path = "../config" }
-drocsid-protocol = { path = "../protocol" }
+drocsid-config = { version = "0.1.0", path = "../config" }
+drocsid-protocol = { version = "0.1.0", path = "../protocol" }
