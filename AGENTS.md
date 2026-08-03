@@ -71,7 +71,7 @@ Examples:
 - `ratatui`, `crossterm`, and terminal rendering helpers belong in `drocsid-tui`.
 - TCP and session state belong in `drocsid-server` or `drocsid-client`.
 - Message encoding, presence events, and mention matching belong in `drocsid-protocol`.
-- `dotenvy` belongs in `apps/drocsid`, where process configuration is loaded.
+- Runtime addresses and server options are parsed by `drocsid-cli`; process configuration does not depend on `.env` files.
 
 ## Code organization
 

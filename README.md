@@ -37,21 +37,21 @@ cd drocsid
 cargo build --package drocsid
 ```
 
-Start the server in one terminal:
+Start the server in one terminal. It listens on `0.0.0.0:7878` by default:
 
 ```bash
-cargo run --package drocsid -- mode=server
+cargo run --package drocsid -- server
 ```
 
 Connect a client from another terminal:
 
 ```bash
-cargo run --package drocsid -- mode=client username=alice
+cargo run --package drocsid -- client --username alice
 ```
 
 Open more clients with different usernames to test a shared chat session.
 
-The default server address is `0.0.0.0:7878`, and clients connect to `127.0.0.1:7878`.
+The default client address is `127.0.0.1:7878`.
 
 ## Installation
 
@@ -71,45 +71,34 @@ The Android ARM64 archive can be used from Termux:
 pkg install tar
 tar -xzf drocsid-vX.Y.Z-android-arm64.tar.gz
 chmod +x drocsid
-./drocsid mode=client username=alice
+./drocsid client --username alice
 ```
 
 The published Android artifact targets `aarch64-linux-android`. Other Android architectures are not currently published.
 
 ## Command-line interface
 
-Arguments use the `key=value` format:
+The application uses subcommands with conventional long options:
 
-| Argument | Required | Description |
-| --- | --- | --- |
-| `mode=server` | Yes | Starts the TCP server. |
-| `mode=client` | Yes | Starts the terminal client. |
-| `username=<name>` | Client only | Sets the username sent during the client handshake. |
+| Command | Option | Default | Description |
+| --- | --- | --- | --- |
+| `server` | `--listen <ADDR>` | `0.0.0.0:7878` | Local address where the server accepts connections. |
+| `server` | `--latency-ms <MS>` | `0` | Artificial delay before broadcasting messages. |
+| `client` | `--connect <ADDR>` | `127.0.0.1:7878` | Server address to connect to. |
+| `client` | `--username <NAME>` | Required | Username sent during the client handshake. |
 
 Examples:
 
 ```bash
-drocsid mode=server
-drocsid mode=client username=alice
+drocsid server
+drocsid server --listen 0.0.0.0:9000 --latency-ms 25
+drocsid client --username alice
+drocsid client --connect 3.137.142.191:7878 --username alice
 ```
 
-The application rejects unknown modes and blank client usernames.
+Run `drocsid --help` or `drocsid <command> --help` for the complete command reference. Server and client defaults can be overridden per invocation; no `.env` file is required.
 
-## Configuration
-
-Configuration is read from environment variables. To create a local configuration file:
-
-```bash
-cp .env.example .env
-```
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `SERVER_BIND_ADDR` | `0.0.0.0:7878` | Address and port where the server accepts connections. |
-| `SERVER_CONNECT_ADDR` | `127.0.0.1:7878` | Address and port used by clients to connect. |
-| `SERVER_SIMULATED_LATENCY_MS` | `0` | Artificial server delay before broadcasting messages. |
-
-For a server running on another machine, set `SERVER_CONNECT_ADDR` to its reachable address and allow the selected TCP port through the firewall.
+For a server running on another machine, pass its reachable address to the client with `--connect` and allow the selected TCP port through the firewall.
 
 ## Client controls
 
