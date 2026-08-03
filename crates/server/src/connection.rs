@@ -125,15 +125,19 @@ impl ConnectionHandler {
         let join_message = format!("@{} has entered the chat. Say hello!\n", username);
         info!(username = ?username, phase = "lifecycle", "client joined chat");
         record_message(&self.state, &join_message)?;
-        if let Err(error) = broadcast(&self.state, &join_message, None) {
-            warn!(
-                error = %error,
-                error_kind = ?error_kind(&error),
-                phase = "broadcast",
-                event = "join",
-                "failed to broadcast join event"
-            );
-            return Err(error);
+        match broadcast(&self.state, &join_message, None) {
+            Ok(true) => broadcast_presence(&self.state)?,
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    error_kind = ?error_kind(&error),
+                    phase = "broadcast",
+                    event = "join",
+                    "failed to broadcast join event"
+                );
+                return Err(error);
+            }
         }
 
         let result = self.read_messages(&mut reader, sender_addr, &username);
@@ -231,14 +235,18 @@ impl ConnectionHandler {
 
             let message = Self::format_server_message(username, &content);
             record_message(&self.state, &message)?;
-            if let Err(error) = broadcast(&self.state, &format!("{message}\n"), None) {
-                warn!(
-                    error = %error,
-                    error_kind = ?error_kind(&error),
-                    phase = "broadcast",
-                    "failed to broadcast chat message"
-                );
-                return Err(error);
+            match broadcast(&self.state, &format!("{message}\n"), None) {
+                Ok(true) => broadcast_presence(&self.state)?,
+                Ok(false) => {}
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        error_kind = ?error_kind(&error),
+                        phase = "broadcast",
+                        "failed to broadcast chat message"
+                    );
+                    return Err(error);
+                }
             }
         }
     }
@@ -282,7 +290,7 @@ impl ConnectionHandler {
                 .map_err(|error| match error {
                     std::sync::mpsc::TrySendError::Full(_) => ServerError::OutboundQueueFull,
                     std::sync::mpsc::TrySendError::Disconnected(_) => {
-                        ServerError::ClientStatePoisoned
+                        ServerError::OutboundWriterGone
                     }
                 })?;
         }

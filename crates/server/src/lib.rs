@@ -42,6 +42,10 @@ pub enum ServerError {
     MessageRateLimitExceeded,
     #[error("client outbound queue is full")]
     OutboundQueueFull,
+    #[error("client outbound writer is gone")]
+    OutboundWriterGone,
+    #[error("client is unknown or no longer active")]
+    UnknownClient,
     #[error("shared client state is poisoned")]
     ClientStatePoisoned,
     #[error("io error: {0}")]

@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
-    net::{IpAddr, SocketAddr, TcpStream},
+    net::{IpAddr, Shutdown, SocketAddr, TcpStream},
     sync::{
         Arc, Mutex,
         mpsc::{self, SyncSender, TrySendError},
@@ -15,7 +15,8 @@ use tracing::warn;
 const MESSAGE_HISTORY_LIMIT: usize = 100;
 pub const MAX_CONNECTIONS: usize = 256;
 pub const MAX_CONNECTIONS_PER_IP: usize = 4;
-const OUTBOUND_QUEUE_SIZE: usize = 128;
+const PENDING_MESSAGES_LIMIT: usize = 128;
+const OUTBOUND_QUEUE_SIZE: usize = MESSAGE_HISTORY_LIMIT + PENDING_MESSAGES_LIMIT;
 const MESSAGE_RATE_PER_SECOND: f64 = 10.0;
 const MESSAGE_BURST_SIZE: f64 = 20.0;
 
@@ -60,7 +61,18 @@ struct RateLimitState {
 }
 
 pub(crate) type ClientWriter = SyncSender<String>;
-pub(crate) type ClientToken = Arc<()>;
+#[derive(Clone, Debug)]
+pub(crate) struct ClientToken(Arc<()>);
+
+impl ClientToken {
+    fn new() -> Self {
+        Self(Arc::new(()))
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 struct ClientEntry {
     addr: SocketAddr,
@@ -122,7 +134,7 @@ fn register_client_with_status(
 
     let (writer, receiver) = mpsc::sync_channel(OUTBOUND_QUEUE_SIZE);
     let stream = stream.try_clone()?;
-    let token = Arc::new(());
+    let token = ClientToken::new();
     let writer_token = token.clone();
     std::thread::spawn(move || {
         outbound_writer(stream, receiver, address, writer_state, writer_token)
@@ -148,16 +160,26 @@ pub(crate) fn mark_client_ready(
     let client = state
         .clients
         .iter_mut()
-        .find(|client| client.addr == target_addr && Arc::ptr_eq(&client.token, target_token))
-        .ok_or(ServerError::ClientStatePoisoned)?;
+        .find(|client| client.addr == target_addr && client.token.matches(target_token))
+        .ok_or(ServerError::UnknownClient)?;
     let writer = client.writer.clone();
     let pending_messages = std::mem::take(&mut client.pending_messages);
 
-    for message in pending_messages {
-        writer.try_send(message).map_err(|error| match error {
-            TrySendError::Full(_) => ServerError::OutboundQueueFull,
-            TrySendError::Disconnected(_) => ServerError::ClientStatePoisoned,
-        })?;
+    let mut remaining = pending_messages.into_iter();
+    for message in remaining.by_ref() {
+        match writer.try_send(message) {
+            Ok(()) => {}
+            Err(TrySendError::Full(message)) => {
+                client.pending_messages.push(message);
+                client.pending_messages.extend(remaining);
+                return Err(ServerError::OutboundQueueFull);
+            }
+            Err(TrySendError::Disconnected(message)) => {
+                client.pending_messages.push(message);
+                client.pending_messages.extend(remaining);
+                return Err(ServerError::OutboundWriterGone);
+            }
+        }
     }
 
     client.ready = true;
@@ -174,20 +196,21 @@ pub(crate) fn history_snapshot(
     state
         .clients
         .iter()
-        .find(|client| client.addr == target_addr && Arc::ptr_eq(&client.token, target_token))
+        .find(|client| client.addr == target_addr && client.token.matches(target_token))
         .map(|client| (client.writer.clone(), state.history.snapshot()))
-        .ok_or(ServerError::ClientStatePoisoned)
+        .ok_or(ServerError::UnknownClient)
 }
 
 pub(crate) fn remove_client_if_current(
     state: &ServerStateHandle,
     target_addr: SocketAddr,
     target_token: &ClientToken,
-) -> Result<(), ServerError> {
+) -> Result<bool, ServerError> {
     let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
+    let before = state.clients.len();
     state
         .clients
-        .retain(|client| !(client.addr == target_addr && Arc::ptr_eq(&client.token, target_token)));
+        .retain(|client| !(client.addr == target_addr && client.token.matches(target_token)));
 
     if !state
         .clients
@@ -197,7 +220,7 @@ pub(crate) fn remove_client_if_current(
         state.rate_limits.remove(&target_addr.ip());
     }
 
-    Ok(())
+    Ok(state.clients.len() != before)
 }
 
 pub fn allow_message(
@@ -237,9 +260,11 @@ pub fn set_client_username(
     if let Some(client) = state
         .clients
         .iter_mut()
-        .find(|client| client.addr == target_addr && Arc::ptr_eq(&client.token, target_token))
+        .find(|client| client.addr == target_addr && client.token.matches(target_token))
     {
         client.username = Some(username.to_string());
+    } else {
+        return Err(ServerError::UnknownClient);
     }
 
     Ok(())
@@ -249,11 +274,10 @@ pub(crate) fn broadcast(
     state: &ServerStateHandle,
     message: &str,
     exclude_addr: Option<SocketAddr>,
-) -> Result<(), ServerError> {
-    let (clients, pending_overloaded) = {
+) -> Result<bool, ServerError> {
+    let mut doomed = Vec::new();
+    {
         let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
-        let mut clients = Vec::new();
-        let mut pending_overloaded = Vec::new();
 
         for client in &mut state.clients {
             if exclude_addr.is_some_and(|addr| client.addr == addr) {
@@ -261,37 +285,29 @@ pub(crate) fn broadcast(
             }
 
             if client.ready {
-                clients.push((client.addr, client.token.clone(), client.writer.clone()));
-            } else if client.pending_messages.len() >= OUTBOUND_QUEUE_SIZE {
-                pending_overloaded.push((client.addr, client.token.clone()));
+                match client.writer.try_send(message.to_string()) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        doomed.push((client.addr, client.token.clone(), "outbound queue is full"));
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        doomed.push((client.addr, client.token.clone(), "outbound writer is gone"));
+                    }
+                }
+            } else if client.pending_messages.len() >= PENDING_MESSAGES_LIMIT {
+                doomed.push((client.addr, client.token.clone(), "pending queue is full"));
             } else {
                 client.pending_messages.push(message.to_string());
             }
         }
-
-        (clients, pending_overloaded)
-    };
-
-    for (address, token) in pending_overloaded {
-        warn!(%address, "dropping client because pending outbound queue is full");
-        remove_client_if_current(state, address, &token)?;
     }
 
-    for (address, token, writer) in clients {
-        match writer.try_send(message.to_string()) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                warn!(%address, "dropping slow client because outbound queue is full");
-                remove_client_if_current(state, address, &token)?;
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                warn!(%address, "dropping client with disconnected outbound writer");
-                remove_client_if_current(state, address, &token)?;
-            }
-        }
+    for (address, token, reason) in &doomed {
+        warn!(%address, reason, phase = "broadcast", "dropping client");
+        remove_client_if_current(state, *address, token)?;
     }
 
-    Ok(())
+    Ok(!doomed.is_empty())
 }
 
 fn outbound_writer(
@@ -307,19 +323,35 @@ fn outbound_writer(
                 %address,
                 error = %error,
                 error_kind = ?error.kind(),
+                phase = "outbound_write",
                 "outbound writer stopped"
             );
-            if let Err(cleanup_error) = remove_client_if_current(&state, address, &token) {
-                warn!(
-                    %address,
-                    error = %cleanup_error,
-                    error_kind = ?cleanup_error,
-                    "failed to remove client after outbound writer stopped"
-                );
+            match remove_client_if_current(&state, address, &token) {
+                Ok(true) => {
+                    if let Err(presence_error) = broadcast_presence(&state) {
+                        warn!(
+                            %address,
+                            error = %presence_error,
+                            phase = "presence",
+                            "failed to broadcast client removal"
+                        );
+                    }
+                }
+                Ok(false) => {}
+                Err(cleanup_error) => {
+                    warn!(
+                        %address,
+                        error = %cleanup_error,
+                        phase = "disconnect",
+                        "failed to remove client after outbound writer stopped"
+                    );
+                }
             }
             break;
         }
     }
+
+    let _ = stream.shutdown(Shutdown::Both);
 }
 
 pub fn usernames(state: &ServerStateHandle) -> Result<Vec<String>, ServerError> {
@@ -332,8 +364,12 @@ pub fn usernames(state: &ServerStateHandle) -> Result<Vec<String>, ServerError> 
 }
 
 pub fn broadcast_presence(state: &ServerStateHandle) -> Result<(), ServerError> {
-    let users = usernames(state)?;
-    broadcast(state, &build_users_event(&users), None)
+    loop {
+        let users = usernames(state)?;
+        if !broadcast(state, &build_users_event(&users), None)? {
+            return Ok(());
+        }
+    }
 }
 
 pub fn record_message(state: &ServerStateHandle, message: &str) -> Result<(), ServerError> {
@@ -348,13 +384,13 @@ mod tests {
     use std::{
         io::{BufRead, BufReader, Read},
         net::{SocketAddr, TcpListener, TcpStream},
-        sync::{Arc, mpsc},
+        sync::mpsc,
         thread,
         time::Duration,
     };
 
     use super::{
-        ClientEntry, MessageHistory, OUTBOUND_QUEUE_SIZE, broadcast, history_snapshot,
+        ClientEntry, ClientToken, MessageHistory, OUTBOUND_QUEUE_SIZE, broadcast, history_snapshot,
         mark_client_ready, new_shared_state, record_message, register_client,
         register_pending_client, remove_client_if_current,
     };
@@ -437,7 +473,7 @@ mod tests {
             let mut state_guard = state.lock().unwrap();
             state_guard.clients.push(ClientEntry {
                 addr: address,
-                token: Arc::new(()),
+                token: ClientToken::new(),
                 writer: writer.clone(),
                 username: Some("slow-client".to_string()),
                 ready: true,
@@ -461,8 +497,8 @@ mod tests {
         let address: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         let (old_writer, _old_receiver) = mpsc::sync_channel(1);
         let (new_writer, _new_receiver) = mpsc::sync_channel(1);
-        let old_token = Arc::new(());
-        let new_token = Arc::new(());
+        let old_token = ClientToken::new();
+        let new_token = ClientToken::new();
 
         {
             let mut state_guard = state.lock().unwrap();
