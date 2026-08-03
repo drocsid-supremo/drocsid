@@ -310,7 +310,7 @@ mod tests {
 
     use super::{
         MessageHistory, broadcast, history_snapshot, mark_client_ready, new_shared_state,
-        register_pending_client,
+        record_message, register_client, register_pending_client,
     };
 
     #[test]
@@ -322,6 +322,25 @@ mod tests {
         history.record("third\n");
 
         assert_eq!(history.snapshot(), ["second", "third"]);
+    }
+
+    #[test]
+    fn server_history_snapshot_returns_trimmed_retained_messages_in_order() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let _client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_stream, client_addr) = listener.accept().unwrap();
+        let state = new_shared_state();
+
+        register_client(&state, &server_stream).unwrap();
+        for index in 0..=100 {
+            record_message(&state, &format!("message {index}\n")).unwrap();
+        }
+
+        let (_, history) = history_snapshot(&state, client_addr).unwrap();
+
+        assert_eq!(history.len(), 100);
+        assert_eq!(history.first().unwrap(), "message 1");
+        assert_eq!(history.last().unwrap(), "message 100");
     }
 
     #[test]
