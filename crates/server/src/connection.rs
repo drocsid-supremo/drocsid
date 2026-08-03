@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 
 use super::state::{
     ServerStateHandle, allow_message, broadcast, broadcast_presence, message_history,
-    record_message, remove_client, set_client_username,
+    record_message, register_client, remove_client, set_client_username,
 };
 
 const MAX_MESSAGE_BYTES: usize = 4 * 1024;
@@ -33,32 +33,76 @@ impl ConnectionHandler {
         }
     }
 
-    pub fn serve(&self, mut stream: TcpStream) -> Result<(), ServerError> {
-        let sender_addr = stream.peer_addr()?;
-        stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    pub(crate) fn authenticate(
+        &self,
+        stream: &mut TcpStream,
+        sender_addr: SocketAddr,
+    ) -> Result<String, ServerError> {
+        self.authenticate_with_timeout(stream, sender_addr, HANDSHAKE_TIMEOUT)
+    }
+
+    fn authenticate_with_timeout(
+        &self,
+        stream: &mut TcpStream,
+        sender_addr: SocketAddr,
+        handshake_timeout: Duration,
+    ) -> Result<String, ServerError> {
+        stream.set_read_timeout(Some(handshake_timeout))?;
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         stream.set_nodelay(true)?;
-
-        let username = {
-            let mut handshake_reader = FrameReader::new(stream.try_clone()?);
-            match self.read_handshake_username(&mut handshake_reader, sender_addr) {
-                Ok(username) => username,
-                Err(error) => {
-                    warn!(
-                        error = %error,
-                        error_kind = ?error_kind(&error),
-                        phase = "handshake",
-                        "handshake failed"
-                    );
-                    return Err(error);
-                }
+        let mut handshake_reader = FrameReader::new(stream.try_clone()?);
+        let username = match self.read_handshake_username(&mut handshake_reader) {
+            Ok(username) => username,
+            Err(error) => {
+                warn!(
+                    %sender_addr,
+                    error = %error,
+                    error_kind = ?error_kind(&error),
+                    phase = "handshake",
+                    "handshake failed"
+                );
+                return Err(error);
             }
         };
+
         stream.set_read_timeout(None)?;
+        register_client(&self.state, stream)?;
+        set_client_username(&self.state, sender_addr, &username)?;
+        Ok(username)
+    }
+
+    pub(crate) fn serve_authenticated(
+        &self,
+        stream: TcpStream,
+        sender_addr: SocketAddr,
+        username: String,
+    ) -> Result<(), ServerError> {
+        let result = self.serve_authenticated_inner(stream, sender_addr, username);
+
+        if let Err(error) = &result
+            && let Err(cleanup_error) = remove_client(&self.state, sender_addr)
+        {
+            warn!(
+                error = %cleanup_error,
+                error_kind = ?error_kind(&cleanup_error),
+                phase = "disconnect",
+                original_error = %error,
+                "failed to clean up client after session error"
+            );
+        }
+
+        result
+    }
+
+    fn serve_authenticated_inner(
+        &self,
+        mut stream: TcpStream,
+        sender_addr: SocketAddr,
+        username: String,
+    ) -> Result<(), ServerError> {
         let mut reader = FrameReader::new(stream.try_clone()?);
         info!(username = ?username, phase = "handshake", "handshake completed");
 
-        set_client_username(&self.state, sender_addr, &username)?;
         if let Err(error) = self.send_message_history(&mut stream) {
             remove_client(&self.state, sender_addr)?;
             warn!(
@@ -114,37 +158,30 @@ impl ConnectionHandler {
     fn read_handshake_username<R: Read>(
         &self,
         reader: &mut FrameReader<R>,
-        sender_addr: SocketAddr,
     ) -> Result<String, ServerError> {
         let raw_username = match reader.read_frame(MAX_USERNAME_BYTES) {
             Ok(Some(bytes)) => match String::from_utf8(bytes) {
                 Ok(username) => username,
                 Err(_) => {
-                    remove_client(&self.state, sender_addr)?;
                     return Err(ServerError::InvalidUtf8);
                 }
             },
             Ok(None) => {
-                remove_client(&self.state, sender_addr)?;
                 return Err(ServerError::EmptyHandshakeUsername);
             }
             Err(FrameError::TooLong) => {
-                remove_client(&self.state, sender_addr)?;
                 return Err(ServerError::UsernameTooLong);
             }
             Err(FrameError::Io(error)) => {
-                let _ = remove_client(&self.state, sender_addr);
                 return Err(error.into());
             }
         };
 
         if raw_username.trim().is_empty() {
-            remove_client(&self.state, sender_addr)?;
             return Err(ServerError::EmptyHandshakeUsername);
         }
 
         if !is_valid_username(&raw_username) {
-            remove_client(&self.state, sender_addr)?;
             return Err(ServerError::UsernameContainsControlCharacters);
         }
 
@@ -314,7 +351,7 @@ fn error_kind(error: &ServerError) -> Option<ErrorKind> {
 mod tests {
     use std::{
         io::{BufRead, BufReader, Cursor, Write},
-        net::{Shutdown, SocketAddr, TcpListener, TcpStream},
+        net::{Shutdown, TcpListener, TcpStream},
         time::Duration,
     };
 
@@ -323,7 +360,7 @@ mod tests {
     use super::{ConnectionHandler, FrameError, FrameReader};
     use crate::{
         ServerError,
-        state::{new_shared_state, register_client},
+        state::{new_shared_state, register_client, set_client_username, usernames},
     };
 
     #[test]
@@ -352,8 +389,6 @@ mod tests {
 
     #[test]
     fn rejects_control_characters_during_handshake() {
-        let sender_addr: SocketAddr = "127.0.0.1:7878".parse().unwrap();
-
         for frame in [
             b"alice\x1b[2J\n".as_slice(),
             b"alice\r\n".as_slice(),
@@ -363,10 +398,80 @@ mod tests {
             let mut reader = FrameReader::new(Cursor::new(frame));
 
             assert!(matches!(
-                handler.read_handshake_username(&mut reader, sender_addr),
+                handler.read_handshake_username(&mut reader),
                 Err(ServerError::UsernameContainsControlCharacters)
             ));
         }
+    }
+
+    #[test]
+    fn registers_a_client_only_after_a_successful_handshake() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server_stream, sender_addr) = listener.accept().unwrap();
+        let state = new_shared_state();
+        let handler = ConnectionHandler::new(state.clone(), Duration::ZERO);
+
+        client_stream
+            .try_clone()
+            .unwrap()
+            .write_all(b"alice\n")
+            .unwrap();
+
+        assert_eq!(
+            handler
+                .authenticate(&mut server_stream, sender_addr)
+                .unwrap(),
+            "alice"
+        );
+        assert_eq!(usernames(&state).unwrap(), vec!["alice"]);
+    }
+
+    #[test]
+    fn times_out_an_incomplete_handshake_without_registering_a_client() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let _client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server_stream, sender_addr) = listener.accept().unwrap();
+        let state = new_shared_state();
+        let handler = ConnectionHandler::new(state.clone(), Duration::ZERO);
+
+        let error = handler
+            .authenticate_with_timeout(&mut server_stream, sender_addr, Duration::from_millis(20))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ServerError::Io(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                )
+        ));
+        assert!(usernames(&state).unwrap().is_empty());
+    }
+
+    #[test]
+    fn removes_a_client_when_authenticated_session_returns_an_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_stream, sender_addr) = listener.accept().unwrap();
+        let state = new_shared_state();
+        register_client(&state, &server_stream).unwrap();
+        set_client_username(&state, sender_addr, "alice").unwrap();
+        assert_eq!(usernames(&state).unwrap(), vec!["alice"]);
+        let handler = ConnectionHandler::new(state.clone(), Duration::ZERO);
+
+        client_stream
+            .write_all(&vec![b'x'; super::MAX_MESSAGE_BYTES + 1])
+            .unwrap();
+        client_stream.write_all(b"\n").unwrap();
+
+        let error = handler
+            .serve_authenticated(server_stream, sender_addr, "alice".to_string())
+            .unwrap_err();
+
+        assert!(matches!(error, ServerError::MessageTooLong));
+        assert!(usernames(&state).unwrap().is_empty());
     }
 
     #[test]
