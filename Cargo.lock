@@ -355,7 +355,7 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "drocsid"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "cargo-husky",
  "dotenvy",
@@ -367,14 +367,14 @@ dependencies = [
 
 [[package]]
 name = "drocsid-cli"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "drocsid-client"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "drocsid-config",
  "drocsid-protocol",
@@ -382,15 +382,15 @@ dependencies = [
 
 [[package]]
 name = "drocsid-config"
-version = "0.1.3"
+version = "0.2.0"
 
 [[package]]
 name = "drocsid-protocol"
-version = "0.1.3"
+version = "0.2.0"
 
 [[package]]
 name = "drocsid-server"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "drocsid-config",
  "drocsid-protocol",
@@ -399,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "drocsid-tui"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "crossterm",
