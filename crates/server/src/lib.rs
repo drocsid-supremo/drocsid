@@ -32,6 +32,8 @@ pub enum ServerError {
     UsernameTooLong,
     #[error("message exceeds the maximum length")]
     MessageTooLong,
+    #[error("message uses a reserved protocol prefix")]
+    ReservedMessagePrefix,
     #[error("received invalid UTF-8 data")]
     InvalidUtf8,
     #[error("connection limit reached")]
