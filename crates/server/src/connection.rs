@@ -15,7 +15,6 @@ use super::state::{
 const MAX_MESSAGE_BYTES: usize = 4 * 1024;
 const MAX_USERNAME_BYTES: usize = 32;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct ConnectionHandler {
@@ -49,7 +48,6 @@ impl ConnectionHandler {
         record_message(&self.state, &join_message)?;
         broadcast(&self.state, &join_message, None)?;
 
-        stream.set_read_timeout(Some(READ_TIMEOUT))?;
         let result = self.read_messages(&mut reader, sender_addr);
         self.disconnect_client(sender_addr, &username)?;
         result
