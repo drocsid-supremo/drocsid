@@ -38,7 +38,16 @@ impl ConnectionHandler {
         stream: &mut TcpStream,
         sender_addr: SocketAddr,
     ) -> Result<String, ServerError> {
-        stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+        self.authenticate_with_timeout(stream, sender_addr, HANDSHAKE_TIMEOUT)
+    }
+
+    fn authenticate_with_timeout(
+        &self,
+        stream: &mut TcpStream,
+        sender_addr: SocketAddr,
+        handshake_timeout: Duration,
+    ) -> Result<String, ServerError> {
+        stream.set_read_timeout(Some(handshake_timeout))?;
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         stream.set_nodelay(true)?;
         let mut handshake_reader = FrameReader::new(stream.try_clone()?);
@@ -46,6 +55,7 @@ impl ConnectionHandler {
             Ok(username) => username,
             Err(error) => {
                 warn!(
+                    %sender_addr,
                     error = %error,
                     error_kind = ?error_kind(&error),
                     phase = "handshake",
@@ -415,6 +425,46 @@ mod tests {
             "alice"
         );
         assert_eq!(usernames(&state).unwrap(), vec!["alice"]);
+    }
+
+    #[test]
+    fn times_out_an_incomplete_handshake_without_registering_a_client() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let _client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server_stream, sender_addr) = listener.accept().unwrap();
+        let state = new_shared_state();
+        let handler = ConnectionHandler::new(state.clone(), Duration::ZERO);
+
+        let error = handler
+            .authenticate_with_timeout(&mut server_stream, sender_addr, Duration::from_millis(20))
+            .unwrap_err();
+
+        assert!(
+            matches!(error, ServerError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut)
+        );
+        assert!(usernames(&state).unwrap().is_empty());
+    }
+
+    #[test]
+    fn removes_a_client_when_authenticated_session_returns_an_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_stream, sender_addr) = listener.accept().unwrap();
+        let state = new_shared_state();
+        register_client(&state, &server_stream).unwrap();
+        let handler = ConnectionHandler::new(state.clone(), Duration::ZERO);
+
+        client_stream
+            .write_all(&vec![b'x'; super::MAX_MESSAGE_BYTES + 1])
+            .unwrap();
+        client_stream.write_all(b"\n").unwrap();
+
+        let error = handler
+            .serve_authenticated(server_stream, sender_addr, "alice".to_string())
+            .unwrap_err();
+
+        assert!(matches!(error, ServerError::MessageTooLong));
+        assert!(usernames(&state).unwrap().is_empty());
     }
 
     #[test]

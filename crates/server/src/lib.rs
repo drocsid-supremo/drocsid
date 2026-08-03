@@ -16,7 +16,7 @@ use thiserror::Error;
 
 use connection::ConnectionHandler;
 use state::{MAX_CONNECTIONS, new_shared_state};
-use tracing::{error, info, info_span, warn};
+use tracing::{debug, error, info, info_span, warn};
 
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 const CONNECTION_WORKER_COUNT: usize = 16;
@@ -84,6 +84,10 @@ pub fn run_server(server_config: &ServerConfig) -> Result<(), ServerError> {
                 drop(stream);
             }
             Err(TrySendError::Disconnected(stream)) => {
+                error!(
+                    %peer_addr,
+                    "connection channel disconnected; shutting down accept loop"
+                );
                 drop(stream);
                 return Ok(());
             }
@@ -122,7 +126,8 @@ fn spawn_connection_worker(
             let username = match handler.authenticate(&mut stream, peer_addr) {
                 Ok(username) => username,
                 Err(error) => {
-                    error!(
+                    debug!(
+                        %peer_addr,
                         error = %error,
                         error_kind = ?error_kind(&error),
                         phase = "handshake",
