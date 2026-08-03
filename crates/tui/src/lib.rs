@@ -8,14 +8,12 @@ use std::{
     time::Duration,
 };
 
-use chrono::Local;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use drocsid_client::{
     app::{ChatApp, MessageState},
     network::{ClientConnection, NetworkEvent},
 };
 use drocsid_config::ServerConfig;
-use drocsid_protocol::format_chat_message;
 use ratatui::Frame;
 use tracing::info;
 
@@ -134,11 +132,7 @@ fn submit_input(app: &mut ChatApp, connection: &mut ClientConnection) -> std::io
         return Ok(());
     }
 
-    let current_time = Local::now().format("%H:%M").to_string();
-    let formatted = format_chat_message(&app.username, &current_time, &content);
-    let wire_message = format!("{formatted}\n");
-
-    if let Err(error) = connection.send_message(&wire_message) {
+    if let Err(error) = connection.send_message(&content) {
         if ClientConnection::is_disconnect_error(&error) {
             app.begin_shutdown(format!("server unavailable: {error}"));
             return Ok(());
@@ -148,6 +142,5 @@ fn submit_input(app: &mut ChatApp, connection: &mut ClientConnection) -> std::io
         return Err(error);
     }
 
-    app.push_message(formatted, MessageState::Pending);
     Ok(())
 }

@@ -6,7 +6,8 @@ use std::{
 };
 
 use crate::ServerError;
-use drocsid_protocol::is_valid_username;
+use chrono::Local;
+use drocsid_protocol::{format_chat_message, is_valid_username};
 use tracing::{debug, info, warn};
 
 use super::state::{
@@ -87,7 +88,7 @@ impl ConnectionHandler {
             return Err(error);
         }
 
-        let result = self.read_messages(&mut reader, sender_addr);
+        let result = self.read_messages(&mut reader, sender_addr, &username);
         if let Err(error) = &result {
             warn!(
                 error = %error,
@@ -154,6 +155,7 @@ impl ConnectionHandler {
         &self,
         reader: &mut FrameReader<TcpStream>,
         sender_addr: SocketAddr,
+        username: &str,
     ) -> Result<(), ServerError> {
         loop {
             let bytes = match reader.read_frame(MAX_MESSAGE_BYTES) {
@@ -168,9 +170,9 @@ impl ConnectionHandler {
                 phase = "message_read",
                 "message frame received"
             );
-            let message = String::from_utf8(bytes).map_err(|_| ServerError::InvalidUtf8)?;
+            let content = String::from_utf8(bytes).map_err(|_| ServerError::InvalidUtf8)?;
 
-            if message.trim().is_empty() {
+            if content.trim().is_empty() {
                 continue;
             }
 
@@ -180,6 +182,7 @@ impl ConnectionHandler {
                 thread::sleep(self.simulated_latency);
             }
 
+            let message = Self::format_server_message(username, &content);
             record_message(&self.state, &message)?;
             if let Err(error) = broadcast(&self.state, &format!("{message}\n"), None) {
                 warn!(
@@ -191,6 +194,15 @@ impl ConnectionHandler {
                 return Err(error);
             }
         }
+    }
+
+    fn format_server_message(username: &str, content: &str) -> String {
+        let timestamp = Local::now().format("%H:%M").to_string();
+        Self::format_server_message_at(username, &timestamp, content)
+    }
+
+    fn format_server_message_at(username: &str, timestamp: &str, content: &str) -> String {
+        format_chat_message(username, timestamp, content)
     }
 
     fn disconnect_client(
@@ -300,10 +312,19 @@ fn error_kind(error: &ServerError) -> Option<ErrorKind> {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Cursor, net::SocketAddr, time::Duration};
+    use std::{
+        io::{BufRead, BufReader, Cursor, Write},
+        net::{Shutdown, SocketAddr, TcpListener, TcpStream},
+        time::Duration,
+    };
+
+    use drocsid_protocol::parse_chat_message;
 
     use super::{ConnectionHandler, FrameError, FrameReader};
-    use crate::{ServerError, state::new_shared_state};
+    use crate::{
+        ServerError,
+        state::{new_shared_state, register_client},
+    };
 
     #[test]
     fn reads_newline_delimited_frames() {
@@ -346,5 +367,55 @@ mod tests {
                 Err(ServerError::UsernameContainsControlCharacters)
             ));
         }
+    }
+
+    #[test]
+    fn formats_messages_with_authenticated_username() {
+        let message = ConnectionHandler::format_server_message_at(
+            "mallory",
+            "12:34",
+            "[alice](10:25): forged author",
+        );
+
+        assert_eq!(
+            parse_chat_message(&message),
+            Some(("mallory", "12:34", "[alice](10:25): forged author"))
+        );
+    }
+
+    #[test]
+    fn broadcasts_messages_with_authenticated_username() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server_addr = listener.local_addr().unwrap();
+        let mut client_stream = TcpStream::connect(server_addr).unwrap();
+        let (server_stream, client_addr) = listener.accept().unwrap();
+        let state = new_shared_state();
+        register_client(&state, &server_stream).unwrap();
+
+        let handler = ConnectionHandler::new(state, Duration::ZERO);
+        let mut reader = FrameReader::new(server_stream.try_clone().unwrap());
+        client_stream
+            .write_all(b"[alice](10:25): forged author\n")
+            .unwrap();
+        client_stream.shutdown(Shutdown::Write).unwrap();
+
+        handler
+            .read_messages(&mut reader, client_addr, "mallory")
+            .unwrap();
+
+        client_stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut broadcast = Vec::new();
+        BufReader::new(client_stream)
+            .read_until(b'\n', &mut broadcast)
+            .unwrap();
+        let message = String::from_utf8(broadcast).unwrap();
+
+        let (username, timestamp, content) = parse_chat_message(message.trim_end()).unwrap();
+        assert_eq!(username, "mallory");
+        assert_eq!(content, "[alice](10:25): forged author");
+        assert_eq!(timestamp.len(), 5);
+        assert_eq!(timestamp.as_bytes()[2], b':');
     }
 }
