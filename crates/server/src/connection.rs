@@ -15,6 +15,7 @@ use super::state::{
 const MAX_MESSAGE_BYTES: usize = 4 * 1024;
 const MAX_USERNAME_BYTES: usize = 32;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct ConnectionHandler {
     state: ServerStateHandle,
@@ -32,6 +33,7 @@ impl ConnectionHandler {
     pub fn serve(&self, mut stream: TcpStream) -> Result<(), ServerError> {
         let sender_addr = stream.peer_addr()?;
         stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+        stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         stream.set_nodelay(true)?;
 
         let username = {
@@ -42,7 +44,13 @@ impl ConnectionHandler {
         let mut reader = FrameReader::new(stream.try_clone()?);
 
         set_client_username(&self.state, sender_addr, &username)?;
-        self.send_message_history(&mut stream)?;
+        if let Err(error) = self.send_message_history(&mut stream) {
+            remove_client(&self.state, sender_addr)?;
+            return match error {
+                ServerError::Io(error) if is_disconnect_error(&error) => Ok(()),
+                error => Err(error),
+            };
+        }
         broadcast_presence(&self.state)?;
 
         let join_message = format!("@{} has entered the chat. Say hello!\n", username);
@@ -212,7 +220,11 @@ enum FrameError {
 fn is_disconnect_error(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
-        ErrorKind::BrokenPipe | ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset
+        ErrorKind::BrokenPipe
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::TimedOut
+            | ErrorKind::WouldBlock
     )
 }
 
