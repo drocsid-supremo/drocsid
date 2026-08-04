@@ -1,14 +1,12 @@
 use std::{
     collections::{HashMap, VecDeque},
-    net::{IpAddr, Shutdown, SocketAddr, TcpStream},
-    sync::{
-        Arc, Mutex,
-        mpsc::{self, SyncSender, TrySendError},
-    },
+    net::{IpAddr, SocketAddr},
+    sync::{Arc, Mutex, mpsc::TrySendError},
     time::{Duration, Instant},
 };
 
 use crate::ServerError;
+use crate::delivery::{ClientDelivery, DeliveryRegistryHandle, new_registry};
 use drocsid_protocol::encode_presence;
 use tracing::warn;
 
@@ -16,7 +14,7 @@ const MESSAGE_HISTORY_LIMIT: usize = 100;
 pub const MAX_CONNECTIONS: usize = 256;
 pub const MAX_CONNECTIONS_PER_IP: usize = 4;
 const PENDING_MESSAGES_LIMIT: usize = 128;
-const OUTBOUND_QUEUE_SIZE: usize = MESSAGE_HISTORY_LIMIT + PENDING_MESSAGES_LIMIT;
+pub(crate) const OUTBOUND_QUEUE_SIZE: usize = MESSAGE_HISTORY_LIMIT + PENDING_MESSAGES_LIMIT;
 const MESSAGE_RATE_PER_SECOND: f64 = 10.0;
 const MESSAGE_BURST_SIZE: f64 = 20.0;
 const RATE_LIMIT_IDLE_EXPIRY: Duration = Duration::from_secs(60);
@@ -25,15 +23,23 @@ pub type ServerStateHandle = Arc<ServerState>;
 
 pub struct ServerState {
     clients: Mutex<ClientRegistry>,
+    pub(crate) deliveries: DeliveryRegistryHandle,
     history: Mutex<MessageHistory>,
     rate_limits: Mutex<HashMap<IpAddr, RateLimitState>>,
     replay_barrier: Mutex<()>,
 }
 
 struct ClientRegistry {
-    by_addr: HashMap<SocketAddr, Vec<ClientEntry>>,
+    by_addr: HashMap<SocketAddr, Vec<ClientSession>>,
     per_ip: HashMap<IpAddr, usize>,
     total: usize,
+}
+
+/// Domain-facing client identity and lifecycle state. It deliberately has no
+/// transport handle; socket delivery is managed by `DeliveryRegistry`.
+struct ClientSession {
+    token: ClientToken,
+    username: Option<String>,
 }
 
 struct MessageHistory {
@@ -68,7 +74,7 @@ struct RateLimitState {
     last_refill: Instant,
 }
 
-pub(crate) type ClientWriter = SyncSender<Vec<u8>>;
+pub(crate) type ClientWriter = crate::delivery::ClientWriter;
 #[derive(Clone, Debug)]
 pub(crate) struct ClientToken(Arc<()>);
 
@@ -82,15 +88,6 @@ impl ClientToken {
     }
 }
 
-struct ClientEntry {
-    addr: SocketAddr,
-    token: ClientToken,
-    writer: ClientWriter,
-    username: Option<String>,
-    ready: bool,
-    pending_messages: Vec<Vec<u8>>,
-}
-
 impl ServerState {
     fn new() -> Self {
         Self {
@@ -99,6 +96,7 @@ impl ServerState {
                 per_ip: HashMap::new(),
                 total: 0,
             }),
+            deliveries: new_registry(),
             history: Mutex::new(MessageHistory::new(MESSAGE_HISTORY_LIMIT)),
             rate_limits: Mutex::new(HashMap::new()),
             replay_barrier: Mutex::new(()),
@@ -110,28 +108,56 @@ pub fn new_shared_state() -> ServerStateHandle {
     Arc::new(ServerState::new())
 }
 
+pub(crate) fn register_pending_client(
+    state: &ServerStateHandle,
+    address: SocketAddr,
+    writer: ClientWriter,
+) -> Result<ClientToken, ServerError> {
+    register_client_with_status(state, address, writer, false)
+}
+
+#[cfg(test)]
+pub(crate) fn register_pending_client_for_test(
+    state: &ServerStateHandle,
+    stream: &std::net::TcpStream,
+) -> Result<ClientToken, ServerError> {
+    let address = stream.peer_addr()?;
+    let (writer, receiver) = std::sync::mpsc::sync_channel::<Vec<u8>>(OUTBOUND_QUEUE_SIZE);
+    let mut stream = stream.try_clone()?;
+    std::thread::spawn(move || {
+        for message in receiver {
+            if std::io::Write::write_all(&mut stream, &message).is_err() {
+                break;
+            }
+        }
+    });
+    register_client_with_status(state, address, writer, false)
+}
+
 #[cfg(test)]
 pub(crate) fn register_client(
     state: &ServerStateHandle,
-    stream: &TcpStream,
+    stream: &std::net::TcpStream,
 ) -> Result<ClientToken, ServerError> {
-    register_client_with_status(state, stream, true)
-}
-
-pub(crate) fn register_pending_client(
-    state: &ServerStateHandle,
-    stream: &TcpStream,
-) -> Result<ClientToken, ServerError> {
-    register_client_with_status(state, stream, false)
+    let address = stream.peer_addr()?;
+    let (writer, receiver) = std::sync::mpsc::sync_channel::<Vec<u8>>(OUTBOUND_QUEUE_SIZE);
+    let mut stream = stream.try_clone()?;
+    std::thread::spawn(move || {
+        for message in receiver {
+            if std::io::Write::write_all(&mut stream, &message).is_err() {
+                break;
+            }
+        }
+    });
+    register_client_with_status(state, address, writer, true)
 }
 
 fn register_client_with_status(
     state: &ServerStateHandle,
-    stream: &TcpStream,
+    address: SocketAddr,
+    writer: ClientWriter,
     ready: bool,
 ) -> Result<ClientToken, ServerError> {
-    let writer_state = Arc::clone(state);
-    let address = stream.peer_addr()?;
     let mut clients = state
         .clients
         .lock()
@@ -143,28 +169,33 @@ fn register_client_with_status(
         return Err(ServerError::ConnectionLimitReached);
     }
 
-    let (writer, receiver) = mpsc::sync_channel(OUTBOUND_QUEUE_SIZE);
-    let stream = stream.try_clone()?;
     let token = ClientToken::new();
-    let writer_token = token.clone();
-    std::thread::spawn(move || {
-        outbound_writer(stream, receiver, address, writer_state, writer_token)
-    });
+    let mut deliveries = state
+        .deliveries
+        .lock()
+        .map_err(|_| ServerError::ClientStatePoisoned)?;
 
     clients
         .by_addr
         .entry(address)
         .or_default()
-        .push(ClientEntry {
-            addr: address,
+        .push(ClientSession {
             token: token.clone(),
-            writer,
             username: None,
-            ready,
-            pending_messages: Vec::new(),
         });
     clients.total += 1;
     *clients.per_ip.entry(address.ip()).or_default() += 1;
+    deliveries
+        .by_addr
+        .entry(address)
+        .or_default()
+        .push(ClientDelivery {
+            addr: address,
+            token: token.clone(),
+            writer,
+            ready,
+            pending_messages: Vec::new(),
+        });
     Ok(token)
 }
 
@@ -173,11 +204,11 @@ pub(crate) fn mark_client_ready(
     target_addr: SocketAddr,
     target_token: &ClientToken,
 ) -> Result<(), ServerError> {
-    let mut clients = state
-        .clients
+    let mut deliveries = state
+        .deliveries
         .lock()
         .map_err(|_| ServerError::ClientStatePoisoned)?;
-    let client = clients
+    let client = deliveries
         .by_addr
         .get_mut(&target_addr)
         .and_then(|entries| {
@@ -186,12 +217,11 @@ pub(crate) fn mark_client_ready(
                 .find(|client| client.token.matches(target_token))
         })
         .ok_or(ServerError::UnknownClient)?;
-    let writer = client.writer.clone();
     let pending_messages = std::mem::take(&mut client.pending_messages);
 
     let mut remaining = pending_messages.into_iter();
     for message in remaining.by_ref() {
-        match writer.try_send(message) {
+        match client.writer.try_send(message) {
             Ok(()) => {}
             Err(TrySendError::Full(message)) => {
                 client.pending_messages.push(message);
@@ -228,12 +258,12 @@ fn history_snapshot_unlocked(
     target_addr: SocketAddr,
     target_token: &ClientToken,
 ) -> Result<(ClientWriter, Vec<String>), ServerError> {
-    let clients = state
-        .clients
+    let deliveries = state
+        .deliveries
         .lock()
         .map_err(|_| ServerError::ClientStatePoisoned)?;
 
-    let writer = clients
+    let writer = deliveries
         .by_addr
         .get(&target_addr)
         .and_then(|entries| {
@@ -243,7 +273,7 @@ fn history_snapshot_unlocked(
         })
         .map(|client| client.writer.clone())
         .ok_or(ServerError::UnknownClient)?;
-    drop(clients);
+    drop(deliveries);
     let history = state
         .history
         .lock()
@@ -297,6 +327,18 @@ pub(crate) fn remove_client_if_current(
         }
         if empty {
             clients.by_addr.remove(&target_addr);
+        }
+        if removed {
+            let mut deliveries = state
+                .deliveries
+                .lock()
+                .map_err(|_| ServerError::ClientStatePoisoned)?;
+            if let Some(entries) = deliveries.by_addr.get_mut(&target_addr) {
+                entries.retain(|client| !client.token.matches(target_token));
+                if entries.is_empty() {
+                    deliveries.by_addr.remove(&target_addr);
+                }
+            }
         }
         removed
     };
@@ -365,12 +407,12 @@ pub(crate) fn broadcast(
 ) -> Result<bool, ServerError> {
     let mut doomed = Vec::new();
     {
-        let mut clients = state
-            .clients
+        let mut deliveries = state
+            .deliveries
             .lock()
             .map_err(|_| ServerError::ClientStatePoisoned)?;
 
-        for client in clients.by_addr.values_mut().flatten() {
+        for client in deliveries.by_addr.values_mut().flatten() {
             if exclude_addr.is_some_and(|addr| client.addr == addr) {
                 continue;
             }
@@ -417,50 +459,6 @@ pub(crate) fn record_and_broadcast(
         .map_err(|_| ServerError::ClientStatePoisoned)?
         .record(message);
     broadcast(state, frame, exclude_addr)
-}
-
-fn outbound_writer(
-    mut stream: TcpStream,
-    receiver: mpsc::Receiver<Vec<u8>>,
-    address: SocketAddr,
-    state: ServerStateHandle,
-    token: ClientToken,
-) {
-    for message in receiver {
-        if let Err(error) = std::io::Write::write_all(&mut stream, &message) {
-            warn!(
-                %address,
-                error = %error,
-                error_kind = ?error.kind(),
-                phase = "outbound_write",
-                "outbound writer stopped"
-            );
-            match remove_client_if_current(&state, address, &token) {
-                Ok(true) => {
-                    if let Err(presence_error) = broadcast_presence(&state) {
-                        warn!(
-                            %address,
-                            error = %presence_error,
-                            phase = "presence",
-                            "failed to broadcast client removal"
-                        );
-                    }
-                }
-                Ok(false) => {}
-                Err(cleanup_error) => {
-                    warn!(
-                        %address,
-                        error = %cleanup_error,
-                        phase = "disconnect",
-                        "failed to remove client after outbound writer stopped"
-                    );
-                }
-            }
-            break;
-        }
-    }
-
-    let _ = stream.shutdown(Shutdown::Both);
 }
 
 pub fn usernames(state: &ServerStateHandle) -> Result<Vec<String>, ServerError> {
@@ -523,12 +521,13 @@ mod tests {
     };
 
     use super::{
-        ClientEntry, ClientToken, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP, MessageHistory,
+        ClientSession, ClientToken, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP, MessageHistory,
         OUTBOUND_QUEUE_SIZE, RATE_LIMIT_IDLE_EXPIRY, RateLimitState, allow_message, broadcast,
         history_snapshot, mark_client_ready, new_shared_state, record_and_broadcast,
-        record_message, register_client, register_pending_client, remove_client_if_current,
-        with_history_replay,
+        record_message, register_client, register_pending_client_for_test,
+        remove_client_if_current, with_history_replay,
     };
+    use crate::delivery::ClientDelivery;
 
     #[test]
     fn message_history_evicts_oldest_entry_without_shifting_retained_entries() {
@@ -567,7 +566,7 @@ mod tests {
         let (server_stream, client_addr) = listener.accept().unwrap();
         let state = new_shared_state();
 
-        let token = register_pending_client(&state, &server_stream).unwrap();
+        let token = register_pending_client_for_test(&state, &server_stream).unwrap();
         let (writer, _) = history_snapshot(&state, client_addr, &token).unwrap();
         let broadcast_state = state.clone();
         let broadcast_thread = thread::spawn(move || {
@@ -610,17 +609,29 @@ mod tests {
                 .by_addr
                 .entry(address)
                 .or_default()
-                .push(ClientEntry {
-                    addr: address,
+                .push(ClientSession {
                     token: ClientToken::new(),
-                    writer: writer.clone(),
                     username: Some("slow-client".to_string()),
-                    ready: true,
-                    pending_messages: Vec::new(),
                 });
             clients.total += 1;
             *clients.per_ip.entry(address.ip()).or_default() += 1;
         }
+        state
+            .deliveries
+            .lock()
+            .unwrap()
+            .by_addr
+            .entry(address)
+            .or_default()
+            .push(ClientDelivery {
+                addr: address,
+                token: state.clients.lock().unwrap().by_addr[&address][0]
+                    .token
+                    .clone(),
+                writer: writer.clone(),
+                ready: true,
+                pending_messages: Vec::new(),
+            });
 
         for _ in 0..OUTBOUND_QUEUE_SIZE {
             writer.try_send(b"already queued\n".to_vec()).unwrap();
@@ -647,29 +658,40 @@ mod tests {
                 .by_addr
                 .entry(address)
                 .or_default()
-                .push(ClientEntry {
-                    addr: address,
+                .push(ClientSession {
                     token: old_token.clone(),
-                    writer: old_writer,
                     username: Some("replacement".to_string()),
-                    ready: true,
-                    pending_messages: Vec::new(),
                 });
             clients
                 .by_addr
                 .entry(address)
                 .or_default()
-                .push(ClientEntry {
-                    addr: address,
-                    token: new_token,
-                    writer: new_writer,
+                .push(ClientSession {
+                    token: new_token.clone(),
                     username: Some("current".to_string()),
-                    ready: true,
-                    pending_messages: Vec::new(),
                 });
             clients.total = 2;
             clients.per_ip.insert(address.ip(), 2);
         }
+        state.deliveries.lock().unwrap().by_addr.insert(
+            address,
+            vec![
+                ClientDelivery {
+                    addr: address,
+                    token: old_token.clone(),
+                    writer: old_writer,
+                    ready: true,
+                    pending_messages: Vec::new(),
+                },
+                ClientDelivery {
+                    addr: address,
+                    token: new_token.clone(),
+                    writer: new_writer,
+                    ready: true,
+                    pending_messages: Vec::new(),
+                },
+            ],
+        );
 
         remove_client_if_current(&state, address, &old_token).unwrap();
 
@@ -793,7 +815,7 @@ mod tests {
         let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (server_stream, client_addr) = listener.accept().unwrap();
         let state = new_shared_state();
-        let token = register_pending_client(&state, &server_stream).unwrap();
+        let token = register_pending_client_for_test(&state, &server_stream).unwrap();
 
         with_history_replay(&state, client_addr, &token, |_writer, history| {
             assert!(history.is_empty());
@@ -814,7 +836,7 @@ mod tests {
     #[test]
     fn global_connection_limit_uses_the_indexed_total() {
         let state = new_shared_state();
-        let (writer, _receiver) = mpsc::sync_channel(OUTBOUND_QUEUE_SIZE);
+        let (_writer, _receiver) = mpsc::sync_channel::<Vec<u8>>(OUTBOUND_QUEUE_SIZE);
 
         {
             let mut clients = state.clients.lock().unwrap();
@@ -824,13 +846,9 @@ mod tests {
                     .by_addr
                     .entry(address)
                     .or_default()
-                    .push(ClientEntry {
-                        addr: address,
+                    .push(ClientSession {
                         token: ClientToken::new(),
-                        writer: writer.clone(),
                         username: None,
-                        ready: true,
-                        pending_messages: Vec::new(),
                     });
                 clients.total += 1;
                 *clients.per_ip.entry(address.ip()).or_default() += 1;
