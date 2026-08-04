@@ -1,13 +1,14 @@
 use std::{
     collections::{HashMap, VecDeque},
     net::{IpAddr, SocketAddr},
-    sync::{Arc, Mutex, mpsc::TrySendError},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use crate::ServerError;
-use crate::delivery::{ClientDelivery, DeliveryRegistryHandle, new_registry};
+use crate::delivery::{ClientDelivery, DeliveryRegistryHandle, OutboundMessage, new_registry};
 use drocsid_protocol::encode_presence;
+use tokio::sync::{mpsc::error::TrySendError, watch};
 use tracing::warn;
 
 const MESSAGE_HISTORY_LIMIT: usize = 100;
@@ -112,8 +113,9 @@ pub(crate) fn register_pending_client(
     state: &ServerStateHandle,
     address: SocketAddr,
     writer: ClientWriter,
+    disconnect: watch::Sender<bool>,
 ) -> Result<ClientToken, ServerError> {
-    register_client_with_status(state, address, writer, false)
+    register_client_with_status(state, address, writer, Some(disconnect), false)
 }
 
 #[cfg(test)]
@@ -122,16 +124,22 @@ pub(crate) fn register_pending_client_for_test(
     stream: &std::net::TcpStream,
 ) -> Result<ClientToken, ServerError> {
     let address = stream.peer_addr()?;
-    let (writer, receiver) = std::sync::mpsc::sync_channel::<Vec<u8>>(OUTBOUND_QUEUE_SIZE);
+    let (writer, mut receiver) = tokio::sync::mpsc::channel::<OutboundMessage>(OUTBOUND_QUEUE_SIZE);
     let mut stream = stream.try_clone()?;
     std::thread::spawn(move || {
-        for message in receiver {
-            if std::io::Write::write_all(&mut stream, &message).is_err() {
-                break;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            while let Some(message) = receiver.recv().await {
+                if std::io::Write::write_all(&mut stream, &message).is_err() {
+                    break;
+                }
             }
-        }
+        });
     });
-    register_client_with_status(state, address, writer, false)
+    register_client_with_status(state, address, writer, None, false)
 }
 
 #[cfg(test)]
@@ -140,22 +148,29 @@ pub(crate) fn register_client(
     stream: &std::net::TcpStream,
 ) -> Result<ClientToken, ServerError> {
     let address = stream.peer_addr()?;
-    let (writer, receiver) = std::sync::mpsc::sync_channel::<Vec<u8>>(OUTBOUND_QUEUE_SIZE);
+    let (writer, mut receiver) = tokio::sync::mpsc::channel::<OutboundMessage>(OUTBOUND_QUEUE_SIZE);
     let mut stream = stream.try_clone()?;
     std::thread::spawn(move || {
-        for message in receiver {
-            if std::io::Write::write_all(&mut stream, &message).is_err() {
-                break;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            while let Some(message) = receiver.recv().await {
+                if std::io::Write::write_all(&mut stream, &message).is_err() {
+                    break;
+                }
             }
-        }
+        });
     });
-    register_client_with_status(state, address, writer, true)
+    register_client_with_status(state, address, writer, None, true)
 }
 
 fn register_client_with_status(
     state: &ServerStateHandle,
     address: SocketAddr,
     writer: ClientWriter,
+    disconnect: Option<watch::Sender<bool>>,
     ready: bool,
 ) -> Result<ClientToken, ServerError> {
     let mut clients = state
@@ -193,6 +208,7 @@ fn register_client_with_status(
             addr: address,
             token: token.clone(),
             writer,
+            disconnect,
             ready,
             pending_messages: Vec::new(),
         });
@@ -224,12 +240,12 @@ pub(crate) fn mark_client_ready(
         match client.writer.try_send(message) {
             Ok(()) => {}
             Err(TrySendError::Full(message)) => {
-                client.pending_messages.push(message);
+                client.pending_messages.push(message.clone());
                 client.pending_messages.extend(remaining);
                 return Err(ServerError::OutboundQueueFull);
             }
-            Err(TrySendError::Disconnected(message)) => {
-                client.pending_messages.push(message);
+            Err(TrySendError::Closed(message)) => {
+                client.pending_messages.push(message.clone());
                 client.pending_messages.extend(remaining);
                 return Err(ServerError::OutboundWriterGone);
             }
@@ -334,6 +350,14 @@ pub(crate) fn remove_client_if_current(
                 .lock()
                 .map_err(|_| ServerError::ClientStatePoisoned)?;
             if let Some(entries) = deliveries.by_addr.get_mut(&target_addr) {
+                for client in entries
+                    .iter()
+                    .filter(|client| client.token.matches(target_token))
+                {
+                    if let Some(disconnect) = &client.disconnect {
+                        let _ = disconnect.send(true);
+                    }
+                }
                 entries.retain(|client| !client.token.matches(target_token));
                 if entries.is_empty() {
                     deliveries.by_addr.remove(&target_addr);
@@ -355,8 +379,6 @@ pub fn allow_message(
         .lock()
         .map_err(|_| ServerError::ClientStatePoisoned)?;
     let now = Instant::now();
-    rate_limits
-        .retain(|_, limiter| now.duration_since(limiter.last_refill) < RATE_LIMIT_IDLE_EXPIRY);
     let limiter = rate_limits
         .entry(sender_addr.ip())
         .or_insert_with(|| RateLimitState {
@@ -373,6 +395,17 @@ pub fn allow_message(
     }
 
     limiter.tokens -= 1.0;
+    Ok(())
+}
+
+pub(crate) fn cleanup_rate_limits(state: &ServerStateHandle) -> Result<(), ServerError> {
+    let now = Instant::now();
+    let mut rate_limits = state
+        .rate_limits
+        .lock()
+        .map_err(|_| ServerError::ClientStatePoisoned)?;
+    rate_limits
+        .retain(|_, limiter| now.duration_since(limiter.last_refill) < RATE_LIMIT_IDLE_EXPIRY);
     Ok(())
 }
 
@@ -412,25 +445,26 @@ pub(crate) fn broadcast(
             .lock()
             .map_err(|_| ServerError::ClientStatePoisoned)?;
 
+        let message: OutboundMessage = Arc::from(message);
         for client in deliveries.by_addr.values_mut().flatten() {
             if exclude_addr.is_some_and(|addr| client.addr == addr) {
                 continue;
             }
 
             if client.ready {
-                match client.writer.try_send(message.to_vec()) {
+                match client.writer.try_send(message.clone()) {
                     Ok(()) => {}
                     Err(TrySendError::Full(_)) => {
                         doomed.push((client.addr, client.token.clone(), "outbound queue is full"));
                     }
-                    Err(TrySendError::Disconnected(_)) => {
+                    Err(TrySendError::Closed(_)) => {
                         doomed.push((client.addr, client.token.clone(), "outbound writer is gone"));
                     }
                 }
             } else if client.pending_messages.len() >= PENDING_MESSAGES_LIMIT {
                 doomed.push((client.addr, client.token.clone(), "pending queue is full"));
             } else {
-                client.pending_messages.push(message.to_vec());
+                client.pending_messages.push(message.clone());
             }
         }
     }
@@ -475,24 +509,53 @@ pub fn usernames(state: &ServerStateHandle) -> Result<Vec<String>, ServerError> 
 }
 
 pub fn broadcast_presence(state: &ServerStateHandle) -> Result<(), ServerError> {
-    loop {
-        let users = usernames(state)?;
-        let frame = match encode_presence(&users) {
-            Ok(frame) => frame,
-            Err(error) => {
-                warn!(
-                    error = ?error,
-                    error_kind = "presence_encoding",
-                    phase = "presence",
-                    "failed to encode presence frame"
-                );
-                return Err(ServerError::PresenceEncodingFailed);
+    prune_overloaded_clients(state)?;
+    let users = usernames(state)?;
+    let frame = match encode_presence(&users) {
+        Ok(frame) => frame,
+        Err(error) => {
+            warn!(
+                error = ?error,
+                error_kind = "presence_encoding",
+                phase = "presence",
+                "failed to encode presence frame"
+            );
+            return Err(ServerError::PresenceEncodingFailed);
+        }
+    };
+    if broadcast(state, &frame, None)? {
+        warn!(
+            phase = "presence",
+            "some clients were removed during presence broadcast"
+        );
+    }
+    Ok(())
+}
+
+fn prune_overloaded_clients(state: &ServerStateHandle) -> Result<(), ServerError> {
+    let mut doomed = Vec::new();
+    {
+        let deliveries = state
+            .deliveries
+            .lock()
+            .map_err(|_| ServerError::ClientStatePoisoned)?;
+        for client in deliveries.by_addr.values().flatten() {
+            let overloaded = if client.ready {
+                client.writer.is_closed() || client.writer.capacity() == 0
+            } else {
+                client.pending_messages.len() >= PENDING_MESSAGES_LIMIT
+            };
+            if overloaded {
+                doomed.push((client.addr, client.token.clone()));
             }
-        };
-        if !broadcast(state, &frame, None)? {
-            return Ok(());
         }
     }
+
+    for (address, token) in doomed {
+        warn!(%address, phase = "presence", "dropping overloaded client before presence broadcast");
+        remove_client_if_current(state, address, &token)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -515,17 +578,18 @@ mod tests {
     use std::{
         io::{BufRead, BufReader, Read},
         net::{IpAddr, SocketAddr, TcpListener, TcpStream},
-        sync::mpsc,
+        sync::Arc,
         thread,
         time::{Duration, Instant},
     };
 
     use super::{
         ClientSession, ClientToken, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP, MessageHistory,
-        OUTBOUND_QUEUE_SIZE, RATE_LIMIT_IDLE_EXPIRY, RateLimitState, allow_message, broadcast,
-        history_snapshot, mark_client_ready, new_shared_state, record_and_broadcast,
-        record_message, register_client, register_pending_client_for_test,
-        remove_client_if_current, with_history_replay,
+        OUTBOUND_QUEUE_SIZE, OutboundMessage, RATE_LIMIT_IDLE_EXPIRY, RateLimitState,
+        allow_message, broadcast, cleanup_rate_limits, history_snapshot, mark_client_ready,
+        new_shared_state, record_and_broadcast, record_message, register_client,
+        register_client_with_status, register_pending_client_for_test, remove_client_if_current,
+        with_history_replay,
     };
     use crate::delivery::ClientDelivery;
 
@@ -580,7 +644,7 @@ mod tests {
         let mut unexpected = [0; 1];
         assert!(client_stream.read(&mut unexpected).is_err());
 
-        writer.try_send(b"history\n".to_vec()).unwrap();
+        writer.try_send(Arc::from(b"history\n".as_slice())).unwrap();
         mark_client_ready(&state, client_addr, &token).unwrap();
 
         client_stream
@@ -601,7 +665,7 @@ mod tests {
     fn broadcast_drops_a_client_when_its_outbound_queue_is_full() {
         let state = new_shared_state();
         let address: SocketAddr = "127.0.0.1:12345".parse().unwrap();
-        let (writer, receiver) = mpsc::sync_channel(OUTBOUND_QUEUE_SIZE);
+        let (writer, receiver) = tokio::sync::mpsc::channel(OUTBOUND_QUEUE_SIZE);
 
         {
             let mut clients = state.clients.lock().unwrap();
@@ -629,12 +693,15 @@ mod tests {
                     .token
                     .clone(),
                 writer: writer.clone(),
+                disconnect: None,
                 ready: true,
                 pending_messages: Vec::new(),
             });
 
         for _ in 0..OUTBOUND_QUEUE_SIZE {
-            writer.try_send(b"already queued\n".to_vec()).unwrap();
+            writer
+                .try_send(Arc::from(b"already queued\n".as_slice()))
+                .unwrap();
         }
 
         broadcast(&state, b"new message\n", None).unwrap();
@@ -644,11 +711,25 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_client_signals_its_session_to_stop_reading() {
+        let state = new_shared_state();
+        let address: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let (writer, _receiver) = tokio::sync::mpsc::channel(1);
+        let (disconnect, receiver) = tokio::sync::watch::channel(false);
+        let token =
+            register_client_with_status(&state, address, writer, Some(disconnect), true).unwrap();
+
+        remove_client_if_current(&state, address, &token).unwrap();
+
+        assert!(*receiver.borrow());
+    }
+
+    #[test]
     fn stale_writer_cleanup_does_not_remove_a_replacement_client() {
         let state = new_shared_state();
         let address: SocketAddr = "127.0.0.1:12345".parse().unwrap();
-        let (old_writer, _old_receiver) = mpsc::sync_channel(1);
-        let (new_writer, _new_receiver) = mpsc::sync_channel(1);
+        let (old_writer, _old_receiver) = tokio::sync::mpsc::channel(1);
+        let (new_writer, _new_receiver) = tokio::sync::mpsc::channel(1);
         let old_token = ClientToken::new();
         let new_token = ClientToken::new();
 
@@ -680,6 +761,7 @@ mod tests {
                     addr: address,
                     token: old_token.clone(),
                     writer: old_writer,
+                    disconnect: None,
                     ready: true,
                     pending_messages: Vec::new(),
                 },
@@ -687,6 +769,7 @@ mod tests {
                     addr: address,
                     token: new_token.clone(),
                     writer: new_writer,
+                    disconnect: None,
                     ready: true,
                     pending_messages: Vec::new(),
                 },
@@ -802,6 +885,7 @@ mod tests {
         }
 
         allow_message(&state, SocketAddr::new(active_ip, 1234)).unwrap();
+        cleanup_rate_limits(&state).unwrap();
 
         let rate_limits = state.rate_limits.lock().unwrap();
         assert!(!rate_limits.contains_key(&stale_ips[0]));
@@ -836,7 +920,8 @@ mod tests {
     #[test]
     fn global_connection_limit_uses_the_indexed_total() {
         let state = new_shared_state();
-        let (_writer, _receiver) = mpsc::sync_channel::<Vec<u8>>(OUTBOUND_QUEUE_SIZE);
+        let (_writer, _receiver) =
+            tokio::sync::mpsc::channel::<OutboundMessage>(OUTBOUND_QUEUE_SIZE);
 
         {
             let mut clients = state.clients.lock().unwrap();

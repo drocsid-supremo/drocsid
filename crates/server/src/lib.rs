@@ -2,26 +2,67 @@ mod connection;
 mod delivery;
 mod state;
 
-use std::{
-    net::{IpAddr, TcpListener},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-        mpsc::{self, Receiver, TrySendError},
-    },
-    thread,
-};
-
 use drocsid_config::ServerConfig;
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    sync::{Arc, Mutex},
+};
 use thiserror::Error;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tracing::{error, info, warn};
 
 use connection::ConnectionHandler;
-use state::{MAX_CONNECTIONS, ServerStateHandle, new_shared_state};
-use tracing::{debug, error, info, info_span, warn};
+use state::{MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP, cleanup_rate_limits, new_shared_state};
 
-static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
-const CONNECTION_WORKER_COUNT: usize = 16;
-const PENDING_CONNECTION_QUEUE_SIZE: usize = MAX_CONNECTIONS;
+pub(crate) struct ConnectionPermit {
+    _global: OwnedSemaphorePermit,
+    ip: IpAddr,
+    per_ip: Arc<Mutex<HashMap<IpAddr, usize>>>,
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        if let Ok(mut connections) = self.per_ip.lock()
+            && let Some(count) = connections.get_mut(&self.ip)
+        {
+            *count -= 1;
+            if *count == 0 {
+                connections.remove(&self.ip);
+            }
+        }
+    }
+}
+
+struct ConnectionAdmission {
+    global: Arc<Semaphore>,
+    per_ip: Arc<Mutex<HashMap<IpAddr, usize>>>,
+}
+
+impl ConnectionAdmission {
+    fn new() -> Self {
+        Self {
+            global: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+            per_ip: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn try_acquire(&self, address: SocketAddr) -> Option<ConnectionPermit> {
+        let global = self.global.clone().try_acquire_owned().ok()?;
+        let mut connections = self.per_ip.lock().ok()?;
+        let count = connections.entry(address.ip()).or_default();
+        if *count >= MAX_CONNECTIONS_PER_IP {
+            drop(global);
+            return None;
+        }
+        *count += 1;
+        Some(ConnectionPermit {
+            _global: global,
+            ip: address.ip(),
+            per_ip: self.per_ip.clone(),
+        })
+    }
+}
 
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -62,146 +103,74 @@ pub enum ServerError {
     Io(#[from] std::io::Error),
 }
 
-pub fn run_server(server_config: &ServerConfig) -> Result<(), ServerError> {
-    let listener = TcpListener::bind(&server_config.bind_addr)?;
-    let bound_addr = listener.local_addr()?;
+pub fn run_server(config: &ServerConfig) -> Result<(), ServerError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(run_server_async(config))
+}
 
-    if bind_is_not_loopback(bound_addr.ip()) {
-        warn!(
-            bind_addr = %bound_addr,
-            phase = "startup",
-            "server is listening beyond localhost; traffic is unauthenticated and unencrypted"
-        );
+async fn run_server_async(config: &ServerConfig) -> Result<(), ServerError> {
+    let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
+    let address = listener.local_addr()?;
+    if bind_is_not_loopback(address.ip()) {
+        warn!(bind_addr = %address, phase = "startup", "server is listening beyond localhost; traffic is unauthenticated and unencrypted");
     }
-
     let state = new_shared_state();
-    info!(
-        bind_addr = %server_config.bind_addr,
-        simulated_latency_ms = server_config.simulated_latency.as_millis(),
-        "server listening"
-    );
-
-    let (connection_sender, connection_receiver) =
-        mpsc::sync_channel(PENDING_CONNECTION_QUEUE_SIZE);
-    let connection_receiver = Arc::new(Mutex::new(connection_receiver));
-
-    for _ in 0..CONNECTION_WORKER_COUNT {
-        spawn_connection_worker(
-            Arc::clone(&connection_receiver),
-            Arc::clone(&state),
-            server_config.simulated_latency,
-        );
-    }
-
-    for stream in listener.incoming() {
-        let stream = match stream {
-            Ok(stream) => stream,
-            Err(error) => {
-                warn!(error = %error, error_kind = ?error.kind(), "failed to accept incoming connection");
-                continue;
-            }
-        };
-
-        let peer_addr = stream.peer_addr()?;
-        info!(%peer_addr, "connection accepted");
-
-        match connection_sender.try_send(stream) {
-            Ok(()) => {}
-            Err(TrySendError::Full(stream)) => {
-                warn!(%peer_addr, "connection queue is full");
-                drop(stream);
-            }
-            Err(TrySendError::Disconnected(stream)) => {
-                error!(
-                    %peer_addr,
-                    "connection channel disconnected; shutting down accept loop"
-                );
-                drop(stream);
-                return Ok(());
+    let admission = Arc::new(ConnectionAdmission::new());
+    let cleanup_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Err(error) = cleanup_rate_limits(&cleanup_state) {
+                warn!(error = %error, phase = "rate_limit_cleanup", "failed to clean up idle rate limits");
             }
         }
+    });
+    info!(bind_addr = %address, max_connections = MAX_CONNECTIONS, max_connections_per_ip = MAX_CONNECTIONS_PER_IP, simulated_latency_ms = config.simulated_latency.as_millis(), "server listening");
+    loop {
+        let (stream, peer_addr) = listener.accept().await?;
+        info!(%peer_addr, "connection accepted");
+        let Some(permit) = admission.try_acquire(peer_addr) else {
+            warn!(%peer_addr, phase = "admission", "connection limit reached");
+            drop(stream);
+            continue;
+        };
+        let handler = ConnectionHandler::new(state.clone(), config.simulated_latency);
+        tokio::spawn(async move {
+            if let Err(error) = handler.serve(stream, peer_addr, permit).await {
+                error!(%peer_addr, error = %error, phase = "connection", "connection closed with error");
+            }
+        });
     }
-
-    Ok(())
 }
 
 fn bind_is_not_loopback(ip: IpAddr) -> bool {
     !ip.is_loopback()
 }
 
-fn spawn_connection_worker(
-    receiver: Arc<Mutex<Receiver<std::net::TcpStream>>>,
-    state: ServerStateHandle,
-    simulated_latency: std::time::Duration,
-) {
-    thread::spawn(move || {
-        loop {
-            let stream = match receiver.lock() {
-                Ok(receiver) => receiver.recv(),
-                Err(_) => return,
-            };
-
-            let stream = match stream {
-                Ok(stream) => stream,
-                Err(_) => return,
-            };
-            let peer_addr = match stream.peer_addr() {
-                Ok(peer_addr) => peer_addr,
-                Err(error) => {
-                    warn!(error = %error, error_kind = ?error.kind(), "failed to inspect connection peer");
-                    continue;
-                }
-            };
-            let connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
-            let handler = ConnectionHandler::new(Arc::clone(&state), simulated_latency);
-            let mut stream = stream;
-            let (username, token) = match handler.authenticate(&mut stream, peer_addr) {
-                Ok(session) => session,
-                Err(error) => {
-                    debug!(
-                        %peer_addr,
-                        error = %error,
-                        error_kind = ?error_kind(&error),
-                        phase = "handshake",
-                        "connection handler failed"
-                    );
-                    continue;
-                }
-            };
-
-            thread::spawn(move || {
-                let _connection_span =
-                    info_span!("connection", connection_id, peer_addr = %peer_addr).entered();
-                if let Err(error) = handler.serve_authenticated(stream, peer_addr, username, token)
-                {
-                    error!(
-                        error = %error,
-                        error_kind = ?error_kind(&error),
-                        phase = "connection",
-                        "connection handler failed"
-                    );
-                }
-            });
-        }
-    });
-}
-
-fn error_kind(error: &ServerError) -> Option<std::io::ErrorKind> {
-    match error {
-        ServerError::Io(error) => Some(error.kind()),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::bind_is_not_loopback;
-
+    use super::{ConnectionAdmission, MAX_CONNECTIONS_PER_IP, bind_is_not_loopback};
     #[test]
     fn recognizes_non_loopback_bind_addresses() {
         assert!(!bind_is_not_loopback("127.0.0.1".parse().unwrap()));
         assert!(!bind_is_not_loopback("::1".parse().unwrap()));
         assert!(bind_is_not_loopback("0.0.0.0".parse().unwrap()));
         assert!(bind_is_not_loopback("::".parse().unwrap()));
+    }
+
+    #[test]
+    fn admission_limits_pending_connections_per_ip() {
+        let admission = ConnectionAdmission::new();
+        let address = "127.0.0.1:7878".parse().unwrap();
+        let permits = (0..MAX_CONNECTIONS_PER_IP)
+            .map(|_| admission.try_acquire(address).unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(admission.try_acquire(address).is_none());
+        drop(permits);
+        assert!(admission.try_acquire(address).is_some());
     }
 }
