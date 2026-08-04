@@ -15,7 +15,7 @@ use drocsid_config::ServerConfig;
 use thiserror::Error;
 
 use connection::ConnectionHandler;
-use state::{MAX_CONNECTIONS, new_shared_state};
+use state::{MAX_CONNECTIONS, ServerStateHandle, new_shared_state};
 use tracing::{debug, error, info, info_span, warn};
 
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
@@ -130,7 +130,7 @@ fn bind_is_not_loopback(ip: IpAddr) -> bool {
 
 fn spawn_connection_worker(
     receiver: Arc<Mutex<Receiver<std::net::TcpStream>>>,
-    state: Arc<std::sync::Mutex<state::ServerState>>,
+    state: ServerStateHandle,
     simulated_latency: std::time::Duration,
 ) {
     thread::spawn(move || {

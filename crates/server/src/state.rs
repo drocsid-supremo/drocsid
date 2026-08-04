@@ -20,12 +20,18 @@ const OUTBOUND_QUEUE_SIZE: usize = MESSAGE_HISTORY_LIMIT + PENDING_MESSAGES_LIMI
 const MESSAGE_RATE_PER_SECOND: f64 = 10.0;
 const MESSAGE_BURST_SIZE: f64 = 20.0;
 
-pub type ServerStateHandle = Arc<Mutex<ServerState>>;
+pub type ServerStateHandle = Arc<ServerState>;
 
 pub struct ServerState {
-    clients: Vec<ClientEntry>,
-    history: MessageHistory,
-    rate_limits: HashMap<IpAddr, RateLimitState>,
+    clients: Mutex<ClientRegistry>,
+    history: Mutex<MessageHistory>,
+    rate_limits: Mutex<HashMap<IpAddr, RateLimitState>>,
+}
+
+struct ClientRegistry {
+    by_addr: HashMap<SocketAddr, Vec<ClientEntry>>,
+    per_ip: HashMap<IpAddr, usize>,
+    total: usize,
 }
 
 struct MessageHistory {
@@ -86,15 +92,19 @@ struct ClientEntry {
 impl ServerState {
     fn new() -> Self {
         Self {
-            clients: Vec::new(),
-            history: MessageHistory::new(MESSAGE_HISTORY_LIMIT),
-            rate_limits: HashMap::new(),
+            clients: Mutex::new(ClientRegistry {
+                by_addr: HashMap::new(),
+                per_ip: HashMap::new(),
+                total: 0,
+            }),
+            history: Mutex::new(MessageHistory::new(MESSAGE_HISTORY_LIMIT)),
+            rate_limits: Mutex::new(HashMap::new()),
         }
     }
 }
 
 pub fn new_shared_state() -> ServerStateHandle {
-    Arc::new(Mutex::new(ServerState::new()))
+    Arc::new(ServerState::new())
 }
 
 #[cfg(test)]
@@ -118,16 +128,14 @@ fn register_client_with_status(
     ready: bool,
 ) -> Result<ClientToken, ServerError> {
     let writer_state = Arc::clone(state);
-    let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
     let address = stream.peer_addr()?;
+    let mut clients = state
+        .clients
+        .lock()
+        .map_err(|_| ServerError::ClientStatePoisoned)?;
 
-    if state.clients.len() >= MAX_CONNECTIONS
-        || state
-            .clients
-            .iter()
-            .filter(|client| client.addr.ip() == address.ip())
-            .count()
-            >= MAX_CONNECTIONS_PER_IP
+    if clients.total >= MAX_CONNECTIONS
+        || clients.per_ip.get(&address.ip()).copied().unwrap_or(0) >= MAX_CONNECTIONS_PER_IP
     {
         return Err(ServerError::ConnectionLimitReached);
     }
@@ -140,14 +148,20 @@ fn register_client_with_status(
         outbound_writer(stream, receiver, address, writer_state, writer_token)
     });
 
-    state.clients.push(ClientEntry {
-        addr: address,
-        token: token.clone(),
-        writer,
-        username: None,
-        ready,
-        pending_messages: Vec::new(),
-    });
+    clients
+        .by_addr
+        .entry(address)
+        .or_default()
+        .push(ClientEntry {
+            addr: address,
+            token: token.clone(),
+            writer,
+            username: None,
+            ready,
+            pending_messages: Vec::new(),
+        });
+    clients.total += 1;
+    *clients.per_ip.entry(address.ip()).or_default() += 1;
     Ok(token)
 }
 
@@ -156,11 +170,18 @@ pub(crate) fn mark_client_ready(
     target_addr: SocketAddr,
     target_token: &ClientToken,
 ) -> Result<(), ServerError> {
-    let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
-    let client = state
+    let mut clients = state
         .clients
-        .iter_mut()
-        .find(|client| client.addr == target_addr && client.token.matches(target_token))
+        .lock()
+        .map_err(|_| ServerError::ClientStatePoisoned)?;
+    let client = clients
+        .by_addr
+        .get_mut(&target_addr)
+        .and_then(|entries| {
+            entries
+                .iter_mut()
+                .find(|client| client.token.matches(target_token))
+        })
         .ok_or(ServerError::UnknownClient)?;
     let writer = client.writer.clone();
     let pending_messages = std::mem::take(&mut client.pending_messages);
@@ -191,14 +212,28 @@ pub(crate) fn history_snapshot(
     target_addr: SocketAddr,
     target_token: &ClientToken,
 ) -> Result<(ClientWriter, Vec<String>), ServerError> {
-    let state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
-
-    state
+    let clients = state
         .clients
-        .iter()
-        .find(|client| client.addr == target_addr && client.token.matches(target_token))
-        .map(|client| (client.writer.clone(), state.history.snapshot()))
-        .ok_or(ServerError::UnknownClient)
+        .lock()
+        .map_err(|_| ServerError::ClientStatePoisoned)?;
+
+    let writer = clients
+        .by_addr
+        .get(&target_addr)
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|client| client.token.matches(target_token))
+        })
+        .map(|client| client.writer.clone())
+        .ok_or(ServerError::UnknownClient)?;
+    drop(clients);
+    let history = state
+        .history
+        .lock()
+        .map_err(|_| ServerError::ClientStatePoisoned)?
+        .snapshot();
+    Ok((writer, history))
 }
 
 pub(crate) fn remove_client_if_current(
@@ -206,31 +241,51 @@ pub(crate) fn remove_client_if_current(
     target_addr: SocketAddr,
     target_token: &ClientToken,
 ) -> Result<bool, ServerError> {
-    let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
-    let before = state.clients.len();
-    state
-        .clients
-        .retain(|client| !(client.addr == target_addr && client.token.matches(target_token)));
+    let removed = {
+        let mut clients = state
+            .clients
+            .lock()
+            .map_err(|_| ServerError::ClientStatePoisoned)?;
+        let (removed, empty) = {
+            let Some(entries) = clients.by_addr.get_mut(&target_addr) else {
+                return Ok(false);
+            };
+            let before = entries.len();
+            entries.retain(|client| !client.token.matches(target_token));
+            (entries.len() != before, entries.is_empty())
+        };
+        if removed {
+            clients.total -= 1;
+            let ip_count = clients.per_ip.get_mut(&target_addr.ip()).unwrap();
+            *ip_count -= 1;
+            if *ip_count == 0 {
+                clients.per_ip.remove(&target_addr.ip());
+                state
+                    .rate_limits
+                    .lock()
+                    .map_err(|_| ServerError::ClientStatePoisoned)?
+                    .remove(&target_addr.ip());
+            }
+        }
+        if empty {
+            clients.by_addr.remove(&target_addr);
+        }
+        removed
+    };
 
-    if !state
-        .clients
-        .iter()
-        .any(|client| client.addr.ip() == target_addr.ip())
-    {
-        state.rate_limits.remove(&target_addr.ip());
-    }
-
-    Ok(state.clients.len() != before)
+    Ok(removed)
 }
 
 pub fn allow_message(
     state: &ServerStateHandle,
     sender_addr: SocketAddr,
 ) -> Result<(), ServerError> {
-    let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
-    let now = Instant::now();
-    let limiter = state
+    let mut rate_limits = state
         .rate_limits
+        .lock()
+        .map_err(|_| ServerError::ClientStatePoisoned)?;
+    let now = Instant::now();
+    let limiter = rate_limits
         .entry(sender_addr.ip())
         .or_insert_with(|| RateLimitState {
             tokens: MESSAGE_BURST_SIZE,
@@ -255,13 +310,16 @@ pub fn set_client_username(
     target_token: &ClientToken,
     username: &str,
 ) -> Result<(), ServerError> {
-    let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
-
-    if let Some(client) = state
+    let mut clients = state
         .clients
-        .iter_mut()
-        .find(|client| client.addr == target_addr && client.token.matches(target_token))
-    {
+        .lock()
+        .map_err(|_| ServerError::ClientStatePoisoned)?;
+
+    if let Some(client) = clients.by_addr.get_mut(&target_addr).and_then(|entries| {
+        entries
+            .iter_mut()
+            .find(|client| client.token.matches(target_token))
+    }) {
         client.username = Some(username.to_string());
     } else {
         return Err(ServerError::UnknownClient);
@@ -277,9 +335,12 @@ pub(crate) fn broadcast(
 ) -> Result<bool, ServerError> {
     let mut doomed = Vec::new();
     {
-        let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
+        let mut clients = state
+            .clients
+            .lock()
+            .map_err(|_| ServerError::ClientStatePoisoned)?;
 
-        for client in &mut state.clients {
+        for client in clients.by_addr.values_mut().flatten() {
             if exclude_addr.is_some_and(|addr| client.addr == addr) {
                 continue;
             }
@@ -355,10 +416,14 @@ fn outbound_writer(
 }
 
 pub fn usernames(state: &ServerStateHandle) -> Result<Vec<String>, ServerError> {
-    let state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
-    Ok(state
+    let clients = state
         .clients
-        .iter()
+        .lock()
+        .map_err(|_| ServerError::ClientStatePoisoned)?;
+    Ok(clients
+        .by_addr
+        .values()
+        .flatten()
         .filter_map(|client| client.username.clone())
         .collect())
 }
@@ -385,8 +450,11 @@ pub fn broadcast_presence(state: &ServerStateHandle) -> Result<(), ServerError> 
 }
 
 pub fn record_message(state: &ServerStateHandle, message: &str) -> Result<(), ServerError> {
-    let mut state = state.lock().map_err(|_| ServerError::ClientStatePoisoned)?;
-    state.history.record(message);
+    state
+        .history
+        .lock()
+        .map_err(|_| ServerError::ClientStatePoisoned)?
+        .record(message);
 
     Ok(())
 }
@@ -402,9 +470,10 @@ mod tests {
     };
 
     use super::{
-        ClientEntry, ClientToken, MessageHistory, OUTBOUND_QUEUE_SIZE, broadcast, history_snapshot,
-        mark_client_ready, new_shared_state, record_message, register_client,
-        register_pending_client, remove_client_if_current,
+        ClientEntry, ClientToken, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP, MessageHistory,
+        OUTBOUND_QUEUE_SIZE, allow_message, broadcast, history_snapshot, mark_client_ready,
+        new_shared_state, record_message, register_client, register_pending_client,
+        remove_client_if_current,
     };
 
     #[test]
@@ -482,15 +551,21 @@ mod tests {
         let (writer, receiver) = mpsc::sync_channel(OUTBOUND_QUEUE_SIZE);
 
         {
-            let mut state_guard = state.lock().unwrap();
-            state_guard.clients.push(ClientEntry {
-                addr: address,
-                token: ClientToken::new(),
-                writer: writer.clone(),
-                username: Some("slow-client".to_string()),
-                ready: true,
-                pending_messages: Vec::new(),
-            });
+            let mut clients = state.clients.lock().unwrap();
+            clients
+                .by_addr
+                .entry(address)
+                .or_default()
+                .push(ClientEntry {
+                    addr: address,
+                    token: ClientToken::new(),
+                    writer: writer.clone(),
+                    username: Some("slow-client".to_string()),
+                    ready: true,
+                    pending_messages: Vec::new(),
+                });
+            clients.total += 1;
+            *clients.per_ip.entry(address.ip()).or_default() += 1;
         }
 
         for _ in 0..OUTBOUND_QUEUE_SIZE {
@@ -499,7 +574,7 @@ mod tests {
 
         broadcast(&state, b"new message\n", None).unwrap();
 
-        assert!(state.lock().unwrap().clients.is_empty());
+        assert!(state.clients.lock().unwrap().by_addr.is_empty());
         drop(receiver);
     }
 
@@ -513,29 +588,148 @@ mod tests {
         let new_token = ClientToken::new();
 
         {
-            let mut state_guard = state.lock().unwrap();
-            state_guard.clients.push(ClientEntry {
-                addr: address,
-                token: old_token.clone(),
-                writer: old_writer,
-                username: Some("replacement".to_string()),
-                ready: true,
-                pending_messages: Vec::new(),
-            });
-            state_guard.clients.push(ClientEntry {
-                addr: address,
-                token: new_token,
-                writer: new_writer,
-                username: Some("current".to_string()),
-                ready: true,
-                pending_messages: Vec::new(),
-            });
+            let mut clients = state.clients.lock().unwrap();
+            clients
+                .by_addr
+                .entry(address)
+                .or_default()
+                .push(ClientEntry {
+                    addr: address,
+                    token: old_token.clone(),
+                    writer: old_writer,
+                    username: Some("replacement".to_string()),
+                    ready: true,
+                    pending_messages: Vec::new(),
+                });
+            clients
+                .by_addr
+                .entry(address)
+                .or_default()
+                .push(ClientEntry {
+                    addr: address,
+                    token: new_token,
+                    writer: new_writer,
+                    username: Some("current".to_string()),
+                    ready: true,
+                    pending_messages: Vec::new(),
+                });
+            clients.total = 2;
+            clients.per_ip.insert(address.ip(), 2);
         }
 
         remove_client_if_current(&state, address, &old_token).unwrap();
 
-        let state_guard = state.lock().unwrap();
-        assert_eq!(state_guard.clients.len(), 1);
-        assert_eq!(state_guard.clients[0].username.as_deref(), Some("current"));
+        let clients = state.clients.lock().unwrap();
+        let entries = clients.by_addr.get(&address).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].username.as_deref(), Some("current"));
+    }
+
+    #[test]
+    fn per_ip_limit_is_released_when_a_client_is_removed() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let state = new_shared_state();
+        let mut client_streams = Vec::new();
+        let mut server_streams = Vec::new();
+        let mut addresses = Vec::new();
+        let mut tokens = Vec::new();
+
+        for _ in 0..MAX_CONNECTIONS_PER_IP {
+            let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server_stream, address) = listener.accept().unwrap();
+            let token = register_client(&state, &server_stream).unwrap();
+            client_streams.push(client_stream);
+            server_streams.push(server_stream);
+            addresses.push(address);
+            tokens.push(token);
+        }
+
+        let rejected_client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (rejected_server, _) = listener.accept().unwrap();
+        assert_eq!(
+            register_client(&state, &rejected_server)
+                .unwrap_err()
+                .to_string(),
+            "connection limit reached"
+        );
+
+        remove_client_if_current(&state, addresses[0], &tokens[0]).unwrap();
+
+        let replacement_client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (replacement_server, _) = listener.accept().unwrap();
+        register_client(&state, &replacement_server).unwrap();
+
+        drop(replacement_client);
+        drop(rejected_client);
+        drop(client_streams);
+        drop(server_streams);
+        drop(replacement_server);
+    }
+
+    #[test]
+    fn removing_the_last_client_resets_its_rate_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_stream, client_addr) = listener.accept().unwrap();
+        let state = new_shared_state();
+        let token = register_client(&state, &server_stream).unwrap();
+
+        let mut accepted_messages = 0;
+        loop {
+            if allow_message(&state, client_addr).is_err() {
+                break;
+            }
+            accepted_messages += 1;
+            assert!(accepted_messages <= 1_000);
+        }
+        assert!(accepted_messages >= 20);
+
+        remove_client_if_current(&state, client_addr, &token).unwrap();
+
+        assert!(allow_message(&state, client_addr).is_ok());
+        drop(client_stream);
+        drop(server_stream);
+    }
+
+    #[test]
+    fn global_connection_limit_uses_the_indexed_total() {
+        let state = new_shared_state();
+        let (writer, _receiver) = mpsc::sync_channel(OUTBOUND_QUEUE_SIZE);
+
+        {
+            let mut clients = state.clients.lock().unwrap();
+            for port in 0..MAX_CONNECTIONS {
+                let address: SocketAddr = format!("127.0.0.1:{}", 10_000 + port).parse().unwrap();
+                clients
+                    .by_addr
+                    .entry(address)
+                    .or_default()
+                    .push(ClientEntry {
+                        addr: address,
+                        token: ClientToken::new(),
+                        writer: writer.clone(),
+                        username: None,
+                        ready: true,
+                        pending_messages: Vec::new(),
+                    });
+                clients.total += 1;
+                *clients.per_ip.entry(address.ip()).or_default() += 1;
+            }
+
+            assert_eq!(clients.total, MAX_CONNECTIONS);
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_stream, _) = listener.accept().unwrap();
+
+        assert_eq!(
+            register_client(&state, &server_stream)
+                .unwrap_err()
+                .to_string(),
+            "connection limit reached"
+        );
+        drop(client_stream);
+        drop(server_stream);
     }
 }
