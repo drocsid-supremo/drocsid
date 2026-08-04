@@ -362,7 +362,7 @@ mod tests {
         time::Duration,
     };
     use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt, duplex},
+        io::{AsyncWriteExt, duplex},
         net::{TcpListener, TcpStream},
     };
 
@@ -430,8 +430,8 @@ mod tests {
                 .write_all(&encode_frame(FrameType::Handshake, b"alice").unwrap())
                 .await
                 .unwrap();
-            let mut frame = [0; 6];
-            client.read_exact(&mut frame).await.unwrap();
+            let frame = read_async_frame(&mut client).await.unwrap().unwrap();
+            assert_eq!(frame.kind, FrameType::Presence);
             client.shutdown().await.unwrap();
         });
         let (server, peer) = listener.accept().await.unwrap();
@@ -474,15 +474,16 @@ mod tests {
         }
 
         for client in &mut clients {
-            let mut saw_presence = false;
-            for _ in 0..SESSION_COUNT {
-                let frame = read_async_frame(client).await.unwrap().unwrap();
-                if frame.kind == FrameType::Presence {
-                    saw_presence = true;
-                    break;
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let frame = read_async_frame(client).await.unwrap().unwrap();
+                    if frame.kind == FrameType::Presence {
+                        break;
+                    }
                 }
-            }
-            assert!(saw_presence, "session did not receive a presence frame");
+            })
+            .await
+            .expect("session did not receive a presence frame");
         }
 
         clients[0]
