@@ -1,16 +1,16 @@
 use std::{
-    io::{ErrorKind, Read, Write},
+    io::{ErrorKind, Write},
     net::TcpStream,
     sync::mpsc::{self, Receiver, SyncSender},
     thread,
 };
 
 use drocsid_config::ServerConfig;
-use drocsid_protocol::{USERS_EVENT_PREFIX, parse_users_event};
+use drocsid_protocol::{
+    Frame, FrameType, MAX_CHAT_MESSAGE_BYTES, encode_frame, parse_presence, read_frame,
+};
 use tracing::{debug, info, warn};
 
-const MAX_CHAT_FRAME_BYTES: usize = 4 * 1024;
-const MAX_PRESENCE_FRAME_BYTES: usize = 16 * 1024;
 const NETWORK_EVENT_CAPACITY: usize = 256;
 
 pub enum NetworkEvent {
@@ -47,7 +47,9 @@ impl ClientConnection {
         };
         let reader_stream = stream.try_clone()?;
 
-        if let Err(error) = stream.write_all(format!("{username}\n").as_bytes()) {
+        let handshake = encode_frame(FrameType::Handshake, username.as_bytes())
+            .map_err(|_| std::io::Error::new(ErrorKind::InvalidInput, "username is too large"))?;
+        if let Err(error) = stream.write_all(&handshake) {
             warn!(
                 server_addr = %server_config.connect_addr,
                 error = %error,
@@ -83,7 +85,8 @@ impl ClientConnection {
     }
 
     pub fn send_message(&mut self, message: &str) -> std::io::Result<()> {
-        if let Err(error) = self.stream.write_all(format!("{message}\n").as_bytes()) {
+        let frame = encode_chat_frame(message)?;
+        if let Err(error) = self.stream.write_all(&frame) {
             warn!(
                 server_addr = %self.server_addr,
                 username = %self.username,
@@ -106,6 +109,18 @@ impl ClientConnection {
     }
 }
 
+fn encode_chat_frame(message: &str) -> std::io::Result<Vec<u8>> {
+    if message.len() > MAX_CHAT_MESSAGE_BYTES {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "message is too large",
+        ));
+    }
+
+    encode_frame(FrameType::Chat, message.as_bytes())
+        .map_err(|_| std::io::Error::new(ErrorKind::InvalidInput, "message is too large"))
+}
+
 fn spawn_reader(
     mut reader_stream: TcpStream,
     tx: SyncSender<NetworkEvent>,
@@ -113,159 +128,82 @@ fn spawn_reader(
     username: String,
 ) {
     thread::spawn(move || {
-        let mut buffer = [0; 1024];
-        let mut pending = Vec::new();
-
         loop {
-            let bytes = match reader_stream.read(&mut buffer) {
-                Ok(bytes) => bytes,
+            let frame = match read_frame(&mut reader_stream) {
+                Ok(Some(frame)) => frame,
+                Ok(None) => {
+                    let _ = tx.send(NetworkEvent::Disconnected(
+                        "server disconnected".to_string(),
+                    ));
+                    break;
+                }
                 Err(error) => {
                     warn!(
                         server_addr = %server_addr,
                         username = %username,
-                        error = %error,
-                        error_kind = ?error.kind(),
+                        error = ?error,
                         phase = "message_read",
-                        "client read failed"
+                        "client frame read failed"
                     );
                     let _ = tx.send(NetworkEvent::Disconnected(format!(
-                        "connection error: {error}"
+                        "connection error: {error:?}"
                     )));
                     break;
                 }
             };
-
-            if bytes == 0 {
-                debug!(
-                    server_addr = %server_addr,
-                    username = %username,
-                    phase = "disconnect",
-                    "server closed client connection"
-                );
-                if !pending.is_empty() {
-                    let _ = tx.send(NetworkEvent::Message(
-                        String::from_utf8_lossy(&pending)
-                            .trim_end_matches('\n')
-                            .to_string(),
-                    ));
-                }
-
-                let _ = tx.send(NetworkEvent::Disconnected(
-                    "server disconnected".to_string(),
-                ));
-                break;
-            }
-
-            pending.extend_from_slice(&buffer[..bytes]);
-
-            if !process_pending_frames(&mut pending, &tx) {
+            if !process_frame(frame, &tx) {
                 break;
             }
         }
     });
 }
 
-fn process_pending_frames(pending: &mut Vec<u8>, tx: &SyncSender<NetworkEvent>) -> bool {
-    while let Some(newline_index) = pending.iter().position(|byte| *byte == b'\n') {
-        if newline_index > max_frame_bytes(&pending[..newline_index]) {
+fn process_frame(frame: Frame, tx: &SyncSender<NetworkEvent>) -> bool {
+    match frame.kind {
+        FrameType::Chat => {
+            let message = match String::from_utf8(frame.payload) {
+                Ok(message) => message,
+                Err(_) => {
+                    let _ = tx.send(NetworkEvent::Disconnected(
+                        "server sent invalid UTF-8 chat payload".to_string(),
+                    ));
+                    return false;
+                }
+            };
+            if !message.trim().is_empty() {
+                let _ = tx.send(NetworkEvent::Message(message));
+            }
+        }
+        FrameType::Presence => {
+            let users = match parse_presence(&frame.payload) {
+                Some(users) => users,
+                None => {
+                    let _ = tx.send(NetworkEvent::Disconnected(
+                        "server sent an invalid presence payload".to_string(),
+                    ));
+                    return false;
+                }
+            };
+            let _ = tx.send(NetworkEvent::UserList(users));
+        }
+        FrameType::Handshake => {
             let _ = tx.send(NetworkEvent::Disconnected(
-                "server sent an oversized frame".to_string(),
+                "server sent an unexpected handshake frame".to_string(),
             ));
             return false;
         }
-
-        let line = String::from_utf8_lossy(&pending[..newline_index]).to_string();
-        pending.drain(..=newline_index);
-
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        if let Some(users) = parse_users_event(&line) {
-            let _ = tx.send(NetworkEvent::UserList(users));
-        } else {
-            let _ = tx.send(NetworkEvent::Message(line));
-        }
-    }
-
-    if pending.len() > max_frame_bytes(pending) {
-        let _ = tx.send(NetworkEvent::Disconnected(
-            "server sent an oversized frame".to_string(),
-        ));
-        return false;
     }
 
     true
-}
-
-fn max_frame_bytes(frame: &[u8]) -> usize {
-    if frame.starts_with(USERS_EVENT_PREFIX.as_bytes()) {
-        MAX_PRESENCE_FRAME_BYTES
-    } else {
-        MAX_CHAT_FRAME_BYTES
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
 
-    use super::{
-        MAX_CHAT_FRAME_BYTES, NETWORK_EVENT_CAPACITY, NetworkEvent, USERS_EVENT_PREFIX,
-        process_pending_frames,
-    };
+    use drocsid_protocol::Frame;
 
-    #[test]
-    fn rejects_an_oversized_frame_without_a_newline() {
-        let (tx, rx) = mpsc::sync_channel(NETWORK_EVENT_CAPACITY);
-        let mut pending = vec![b'x'; MAX_CHAT_FRAME_BYTES + 1];
-
-        assert!(!process_pending_frames(&mut pending, &tx));
-        assert!(matches!(
-            rx.recv().unwrap(),
-            NetworkEvent::Disconnected(reason) if reason == "server sent an oversized frame"
-        ));
-    }
-
-    #[test]
-    fn rejects_an_oversized_delimited_frame() {
-        let (tx, rx) = mpsc::sync_channel(NETWORK_EVENT_CAPACITY);
-        let mut pending = format!("{}\n", "x".repeat(MAX_CHAT_FRAME_BYTES + 1)).into_bytes();
-
-        assert!(!process_pending_frames(&mut pending, &tx));
-        assert!(matches!(
-            rx.recv().unwrap(),
-            NetworkEvent::Disconnected(reason) if reason == "server sent an oversized frame"
-        ));
-    }
-
-    #[test]
-    fn accepts_a_presence_frame_larger_than_the_chat_limit() {
-        let (tx, rx) = mpsc::sync_channel(NETWORK_EVENT_CAPACITY);
-        let mut pending =
-            format!("{USERS_EVENT_PREFIX}{}\n", "x".repeat(MAX_CHAT_FRAME_BYTES)).into_bytes();
-
-        assert!(process_pending_frames(&mut pending, &tx));
-        assert!(matches!(rx.recv().unwrap(), NetworkEvent::UserList(_)));
-    }
-
-    #[test]
-    fn counts_frame_bytes_before_decoding_split_utf8() {
-        let (tx, rx) = mpsc::sync_channel(NETWORK_EVENT_CAPACITY);
-        let mut frame = vec![b'x'; MAX_CHAT_FRAME_BYTES - 3];
-        frame.extend_from_slice("€".as_bytes());
-        frame.push(b'\n');
-
-        let mut pending = frame[..MAX_CHAT_FRAME_BYTES - 2].to_vec();
-        assert!(process_pending_frames(&mut pending, &tx));
-
-        pending.extend_from_slice(&frame[MAX_CHAT_FRAME_BYTES - 2..]);
-        assert!(process_pending_frames(&mut pending, &tx));
-        assert!(matches!(
-            rx.recv().unwrap(),
-            NetworkEvent::Message(message) if message.len() == MAX_CHAT_FRAME_BYTES
-        ));
-    }
+    use super::{NETWORK_EVENT_CAPACITY, NetworkEvent, process_frame};
 
     #[test]
     fn event_channel_is_bounded() {
@@ -281,5 +219,65 @@ mod tests {
             Err(mpsc::TrySendError::Full(_))
         ));
         drop(rx);
+    }
+
+    #[test]
+    fn disconnects_on_invalid_chat_utf8() {
+        let (tx, rx) = mpsc::sync_channel(NETWORK_EVENT_CAPACITY);
+        assert!(!process_frame(
+            Frame {
+                version: 1,
+                kind: super::FrameType::Chat,
+                payload: vec![0xff],
+            },
+            &tx,
+        ));
+        assert!(matches!(
+            rx.recv().unwrap(),
+            NetworkEvent::Disconnected(reason) if reason == "server sent invalid UTF-8 chat payload"
+        ));
+    }
+
+    #[test]
+    fn disconnects_on_malformed_presence_payload() {
+        let (tx, rx) = mpsc::sync_channel(NETWORK_EVENT_CAPACITY);
+        assert!(!process_frame(
+            Frame {
+                version: 1,
+                kind: super::FrameType::Presence,
+                payload: vec![0, 1, 0],
+            },
+            &tx,
+        ));
+        assert!(matches!(
+            rx.recv().unwrap(),
+            NetworkEvent::Disconnected(reason) if reason == "server sent an invalid presence payload"
+        ));
+    }
+
+    #[test]
+    fn disconnects_on_unexpected_handshake_frame() {
+        let (tx, rx) = mpsc::sync_channel(NETWORK_EVENT_CAPACITY);
+        assert!(!process_frame(
+            Frame {
+                version: 1,
+                kind: super::FrameType::Handshake,
+                payload: b"alice".to_vec(),
+            },
+            &tx,
+        ));
+        assert!(matches!(
+            rx.recv().unwrap(),
+            NetworkEvent::Disconnected(reason)
+                if reason == "server sent an unexpected handshake frame"
+        ));
+    }
+
+    #[test]
+    fn rejects_chat_messages_over_the_wire_limit_before_encoding() {
+        let error =
+            super::encode_chat_frame(&"x".repeat(super::MAX_CHAT_MESSAGE_BYTES + 1)).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 }

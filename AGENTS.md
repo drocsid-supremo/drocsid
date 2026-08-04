@@ -2,6 +2,10 @@
 
 This repository is a Cargo workspace composed of small, focused crates. Keep the workspace modular by responsibility and dependency ownership.
 
+## Compatibility and breaking changes
+
+Breaking changes are acceptable in this project because it does not have an established user base or compatibility commitment. However, a breaking change is not a justification for regressions: it must provide a concrete improvement, preserve or improve behavioral and test coverage, and leave the project in a better state than before the change.
+
 ## Workspace layout
 
 ```text
@@ -104,6 +108,8 @@ Use test-driven development (TDD) for behavior changes, bug fixes, and security 
 For behavior that crosses a process, transport, or crate boundary, the Red phase must include a test covering that boundary. A lower-level unit test may supplement it but must not replace it.
 
 Every behavior change and security fix must include a focused test that specifies the expected behavior or reproduces the original failure or security violation. The test must fail against the existing behavior before the implementation and pass after it. Keep regression tests close to the crate or module they protect, and include the relevant test command in the pull request validation.
+
+When an implementation changes a protocol, API, or other established contract, replace affected tests with equivalent tests for the new contract. Do not delete those tests without preserving their behavioral coverage through updated assertions or new tests.
 
 ## Validation
 

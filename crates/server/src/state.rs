@@ -9,7 +9,7 @@ use std::{
 };
 
 use crate::ServerError;
-use drocsid_protocol::build_users_event;
+use drocsid_protocol::encode_presence;
 use tracing::warn;
 
 const MESSAGE_HISTORY_LIMIT: usize = 100;
@@ -60,7 +60,7 @@ struct RateLimitState {
     last_refill: Instant,
 }
 
-pub(crate) type ClientWriter = SyncSender<String>;
+pub(crate) type ClientWriter = SyncSender<Vec<u8>>;
 #[derive(Clone, Debug)]
 pub(crate) struct ClientToken(Arc<()>);
 
@@ -80,7 +80,7 @@ struct ClientEntry {
     writer: ClientWriter,
     username: Option<String>,
     ready: bool,
-    pending_messages: Vec<String>,
+    pending_messages: Vec<Vec<u8>>,
 }
 
 impl ServerState {
@@ -272,7 +272,7 @@ pub fn set_client_username(
 
 pub(crate) fn broadcast(
     state: &ServerStateHandle,
-    message: &str,
+    message: &[u8],
     exclude_addr: Option<SocketAddr>,
 ) -> Result<bool, ServerError> {
     let mut doomed = Vec::new();
@@ -285,7 +285,7 @@ pub(crate) fn broadcast(
             }
 
             if client.ready {
-                match client.writer.try_send(message.to_string()) {
+                match client.writer.try_send(message.to_vec()) {
                     Ok(()) => {}
                     Err(TrySendError::Full(_)) => {
                         doomed.push((client.addr, client.token.clone(), "outbound queue is full"));
@@ -297,7 +297,7 @@ pub(crate) fn broadcast(
             } else if client.pending_messages.len() >= PENDING_MESSAGES_LIMIT {
                 doomed.push((client.addr, client.token.clone(), "pending queue is full"));
             } else {
-                client.pending_messages.push(message.to_string());
+                client.pending_messages.push(message.to_vec());
             }
         }
     }
@@ -312,13 +312,13 @@ pub(crate) fn broadcast(
 
 fn outbound_writer(
     mut stream: TcpStream,
-    receiver: mpsc::Receiver<String>,
+    receiver: mpsc::Receiver<Vec<u8>>,
     address: SocketAddr,
     state: ServerStateHandle,
     token: ClientToken,
 ) {
     for message in receiver {
-        if let Err(error) = std::io::Write::write_all(&mut stream, message.as_bytes()) {
+        if let Err(error) = std::io::Write::write_all(&mut stream, &message) {
             warn!(
                 %address,
                 error = %error,
@@ -366,7 +366,19 @@ pub fn usernames(state: &ServerStateHandle) -> Result<Vec<String>, ServerError> 
 pub fn broadcast_presence(state: &ServerStateHandle) -> Result<(), ServerError> {
     loop {
         let users = usernames(state)?;
-        if !broadcast(state, &build_users_event(&users), None)? {
+        let frame = match encode_presence(&users) {
+            Ok(frame) => frame,
+            Err(error) => {
+                warn!(
+                    error = ?error,
+                    error_kind = "presence_encoding",
+                    phase = "presence",
+                    "failed to encode presence frame"
+                );
+                return Err(ServerError::PresenceEncodingFailed);
+            }
+        };
+        if !broadcast(state, &frame, None)? {
             return Ok(());
         }
     }
@@ -436,7 +448,7 @@ mod tests {
         let (writer, _) = history_snapshot(&state, client_addr, &token).unwrap();
         let broadcast_state = state.clone();
         let broadcast_thread = thread::spawn(move || {
-            broadcast(&broadcast_state, "live during history\n", None).unwrap();
+            broadcast(&broadcast_state, b"live during history\n", None).unwrap();
         });
         broadcast_thread.join().unwrap();
 
@@ -446,7 +458,7 @@ mod tests {
         let mut unexpected = [0; 1];
         assert!(client_stream.read(&mut unexpected).is_err());
 
-        writer.try_send("history\n".to_string()).unwrap();
+        writer.try_send(b"history\n".to_vec()).unwrap();
         mark_client_ready(&state, client_addr, &token).unwrap();
 
         client_stream
@@ -482,10 +494,10 @@ mod tests {
         }
 
         for _ in 0..OUTBOUND_QUEUE_SIZE {
-            writer.try_send("already queued\n".to_string()).unwrap();
+            writer.try_send(b"already queued\n".to_vec()).unwrap();
         }
 
-        broadcast(&state, "new message\n", None).unwrap();
+        broadcast(&state, b"new message\n", None).unwrap();
 
         assert!(state.lock().unwrap().clients.is_empty());
         drop(receiver);
