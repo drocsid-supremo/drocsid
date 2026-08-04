@@ -8,8 +8,8 @@ description = "TCP server, sessions, broadcast, and history for drocsid."
 
 [dependencies]
 chrono = "0.4"
-drocsid-config = { version = "0.2.1", path = "../config" }
-drocsid-protocol = { version = "0.2.1", path = "../protocol" }
+drocsid-config = { version = "0.3.0", path = "../config" }
+drocsid-protocol = { version = "0.3.0", path = "../protocol" }
 thiserror = "2"
 tracing = "0.1"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

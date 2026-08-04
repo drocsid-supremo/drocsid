@@ -8,8 +8,8 @@ description = "Ratatui terminal interface for drocsid."
 
 [dependencies]
 crossterm = "0.29"
-drocsid-client = { version = "0.2.1", path = "../client" }
-drocsid-config = { version = "0.2.1", path = "../config" }
-drocsid-protocol = { version = "0.2.1", path = "../protocol" }
+drocsid-client = { version = "0.3.0", path = "../client" }
+drocsid-config = { version = "0.3.0", path = "../config" }
+drocsid-protocol = { version = "0.3.0", path = "../protocol" }
 ratatui = "0.30.1"
 tracing = "0.1"
