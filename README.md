@@ -144,10 +144,11 @@ The repository is a Cargo workspace organized by responsibility:
 | `crates/config` | Shared connection configuration and defaults. |
 | `crates/protocol` | Message, presence, and mention protocol helpers. |
 | `crates/client` | TCP client connection and chat state. |
-| `crates/server` | TCP listener, sessions, broadcasting, and history. |
+| `crates/server` | Tokio-based asynchronous TCP listener, sessions, bounded delivery queues, broadcasting, and history. |
 | `crates/tui` | Ratatui interface and terminal input handling. |
 
 The client and server communicate through a newline-delimited protocol over a plain TCP stream.
+The server uses a bounded Tokio runtime and one asynchronous task per connection; outbound delivery is serialized per client through a bounded queue. Slow clients are disconnected when their queue reaches capacity.
 
 ## Development
 
