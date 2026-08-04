@@ -1,6 +1,7 @@
 use std::{
-    io::{ErrorKind, Read},
-    net::{SocketAddr, TcpStream},
+    io::{ErrorKind, Read, Write},
+    net::{Shutdown, SocketAddr, TcpStream},
+    sync::mpsc::{self, Receiver},
     thread,
     time::Duration,
 };
@@ -13,6 +14,7 @@ use drocsid_protocol::{
 };
 use tracing::{debug, info, warn};
 
+use super::state::OUTBOUND_QUEUE_SIZE;
 use super::state::{
     ClientToken, ServerStateHandle, allow_message, broadcast_presence, mark_client_ready,
     record_and_broadcast, register_pending_client, set_client_username, with_history_replay,
@@ -68,7 +70,20 @@ impl ConnectionHandler {
         };
 
         stream.set_read_timeout(None)?;
-        let token = register_pending_client(&self.state, stream)?;
+        let (writer, receiver) = mpsc::sync_channel(OUTBOUND_QUEUE_SIZE);
+        let writer_stream = stream.try_clone()?;
+        let token = register_pending_client(&self.state, sender_addr, writer)?;
+        let writer_state = self.state.clone();
+        let writer_token = token.clone();
+        thread::spawn(move || {
+            outbound_writer(
+                writer_stream,
+                receiver,
+                sender_addr,
+                writer_state,
+                writer_token,
+            )
+        });
         set_client_username(&self.state, sender_addr, &token, &username)?;
         Ok((username, token))
     }
@@ -349,6 +364,49 @@ impl ConnectionHandler {
             mark_client_ready(&self.state, sender_addr, token)
         })
     }
+}
+
+fn outbound_writer(
+    mut stream: TcpStream,
+    receiver: Receiver<Vec<u8>>,
+    address: SocketAddr,
+    state: ServerStateHandle,
+    token: ClientToken,
+) {
+    for message in receiver {
+        if let Err(error) = stream.write_all(&message) {
+            warn!(
+                %address,
+                error = %error,
+                error_kind = ?error.kind(),
+                phase = "outbound_write",
+                "outbound writer stopped"
+            );
+            match super::state::remove_client_if_current(&state, address, &token) {
+                Ok(true) => {
+                    if let Err(presence_error) = broadcast_presence(&state) {
+                        warn!(
+                            %address,
+                            error = %presence_error,
+                            phase = "presence",
+                            "failed to broadcast client removal"
+                        );
+                    }
+                }
+                Ok(false) => {}
+                Err(cleanup_error) => {
+                    warn!(
+                        %address,
+                        error = %cleanup_error,
+                        phase = "disconnect",
+                        "failed to remove client after outbound writer stopped"
+                    );
+                }
+            }
+            break;
+        }
+    }
+    let _ = stream.shutdown(Shutdown::Both);
 }
 
 struct FrameReader<R> {
