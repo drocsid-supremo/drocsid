@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Cursor, ErrorKind},
+    io::{self, ErrorKind},
     net::SocketAddr,
     sync::{
         Arc,
@@ -10,8 +10,8 @@ use std::{
 
 use chrono::Local;
 use drocsid_protocol::{
-    Frame, FrameType, MAX_CHAT_MESSAGE_BYTES, encode_frame, format_chat_message, is_valid_username,
-    read_frame,
+    CURRENT_PROTOCOL_VERSION, Frame, FrameType, MAX_CHAT_MESSAGE_BYTES, encode_frame,
+    format_chat_message, is_valid_username,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -132,7 +132,6 @@ impl ConnectionHandler {
     ) -> Result<(), ServerError> {
         info!(%sender_addr, username = ?username, phase = "handshake", "handshake completed");
         self.send_message_history(sender_addr, token)?;
-        mark_client_ready(&self.state, sender_addr, token)?;
         broadcast_presence(&self.state)?;
 
         let join_message = format!("@{username} has entered the chat. Say hello!\n");
@@ -328,7 +327,12 @@ async fn read_async_frame<R: AsyncRead + Unpin>(
     if payload_len > drocsid_protocol::MAX_FRAME_PAYLOAD_BYTES {
         return Err(ServerError::MessageTooLong);
     }
-    let mut frame_bytes = bytes.to_vec();
+
+    let version = bytes[0];
+    if version != CURRENT_PROTOCOL_VERSION {
+        return Err(ServerError::UnsupportedProtocolVersion);
+    }
+    let kind = FrameType::try_from(bytes[1]).map_err(|_| ServerError::UnknownProtocolFrameType)?;
     let mut payload = vec![0; payload_len];
     reader.read_exact(&mut payload).await.map_err(|error| {
         if error.kind() == ErrorKind::UnexpectedEof {
@@ -337,17 +341,11 @@ async fn read_async_frame<R: AsyncRead + Unpin>(
             error.into()
         }
     })?;
-    frame_bytes.append(&mut payload);
-    read_frame(&mut Cursor::new(frame_bytes)).map_err(|error| match error {
-        drocsid_protocol::FrameError::UnsupportedVersion(_) => {
-            ServerError::UnsupportedProtocolVersion
-        }
-        drocsid_protocol::FrameError::UnknownType(_) => ServerError::UnknownProtocolFrameType,
-        drocsid_protocol::FrameError::TooLarge(_) => ServerError::MessageTooLong,
-        drocsid_protocol::FrameError::Truncated => ServerError::TruncatedProtocolFrame,
-        drocsid_protocol::FrameError::Io(kind) => io::Error::from(kind).into(),
-        drocsid_protocol::FrameError::InvalidUsername => ServerError::InvalidFrameType,
-    })
+    Ok(Some(Frame {
+        version,
+        kind,
+        payload,
+    }))
 }
 
 #[cfg(test)]

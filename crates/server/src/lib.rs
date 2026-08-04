@@ -16,6 +16,8 @@ use tracing::{error, info, warn};
 use connection::ConnectionHandler;
 use state::{MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP, cleanup_rate_limits, new_shared_state};
 
+const RUNTIME_WORKER_THREADS: usize = 4;
+
 pub(crate) struct ConnectionPermit {
     _global: OwnedSemaphorePermit,
     ip: IpAddr,
@@ -106,6 +108,7 @@ pub enum ServerError {
 
 pub fn run_server(config: &ServerConfig) -> Result<(), ServerError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(RUNTIME_WORKER_THREADS)
         .enable_all()
         .build()?;
     runtime.block_on(run_server_async(config))
