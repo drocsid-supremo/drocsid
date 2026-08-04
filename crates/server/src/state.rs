@@ -5,7 +5,7 @@ use std::{
         Arc, Mutex,
         mpsc::{self, SyncSender, TrySendError},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use crate::ServerError;
@@ -19,6 +19,7 @@ const PENDING_MESSAGES_LIMIT: usize = 128;
 const OUTBOUND_QUEUE_SIZE: usize = MESSAGE_HISTORY_LIMIT + PENDING_MESSAGES_LIMIT;
 const MESSAGE_RATE_PER_SECOND: f64 = 10.0;
 const MESSAGE_BURST_SIZE: f64 = 20.0;
+const RATE_LIMIT_IDLE_EXPIRY: Duration = Duration::from_secs(60);
 
 pub type ServerStateHandle = Arc<ServerState>;
 
@@ -26,6 +27,7 @@ pub struct ServerState {
     clients: Mutex<ClientRegistry>,
     history: Mutex<MessageHistory>,
     rate_limits: Mutex<HashMap<IpAddr, RateLimitState>>,
+    replay_barrier: Mutex<()>,
 }
 
 struct ClientRegistry {
@@ -99,6 +101,7 @@ impl ServerState {
             }),
             history: Mutex::new(MessageHistory::new(MESSAGE_HISTORY_LIMIT)),
             rate_limits: Mutex::new(HashMap::new()),
+            replay_barrier: Mutex::new(()),
         }
     }
 }
@@ -207,7 +210,20 @@ pub(crate) fn mark_client_ready(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn history_snapshot(
+    state: &ServerStateHandle,
+    target_addr: SocketAddr,
+    target_token: &ClientToken,
+) -> Result<(ClientWriter, Vec<String>), ServerError> {
+    let _replay_barrier = state
+        .replay_barrier
+        .lock()
+        .map_err(|_| ServerError::ClientStatePoisoned)?;
+    history_snapshot_unlocked(state, target_addr, target_token)
+}
+
+fn history_snapshot_unlocked(
     state: &ServerStateHandle,
     target_addr: SocketAddr,
     target_token: &ClientToken,
@@ -236,6 +252,23 @@ pub(crate) fn history_snapshot(
     Ok((writer, history))
 }
 
+pub(crate) fn with_history_replay<F>(
+    state: &ServerStateHandle,
+    target_addr: SocketAddr,
+    target_token: &ClientToken,
+    replay: F,
+) -> Result<(), ServerError>
+where
+    F: FnOnce(ClientWriter, Vec<String>) -> Result<(), ServerError>,
+{
+    let _replay_barrier = state
+        .replay_barrier
+        .lock()
+        .map_err(|_| ServerError::ClientStatePoisoned)?;
+    let (writer, history) = history_snapshot_unlocked(state, target_addr, target_token)?;
+    replay(writer, history)
+}
+
 pub(crate) fn remove_client_if_current(
     state: &ServerStateHandle,
     target_addr: SocketAddr,
@@ -260,11 +293,6 @@ pub(crate) fn remove_client_if_current(
             *ip_count -= 1;
             if *ip_count == 0 {
                 clients.per_ip.remove(&target_addr.ip());
-                state
-                    .rate_limits
-                    .lock()
-                    .map_err(|_| ServerError::ClientStatePoisoned)?
-                    .remove(&target_addr.ip());
             }
         }
         if empty {
@@ -285,6 +313,12 @@ pub fn allow_message(
         .lock()
         .map_err(|_| ServerError::ClientStatePoisoned)?;
     let now = Instant::now();
+    if rate_limits
+        .get(&sender_addr.ip())
+        .is_some_and(|limiter| now.duration_since(limiter.last_refill) >= RATE_LIMIT_IDLE_EXPIRY)
+    {
+        rate_limits.remove(&sender_addr.ip());
+    }
     let limiter = rate_limits
         .entry(sender_addr.ip())
         .or_insert_with(|| RateLimitState {
@@ -371,6 +405,24 @@ pub(crate) fn broadcast(
     Ok(!doomed.is_empty())
 }
 
+pub(crate) fn record_and_broadcast(
+    state: &ServerStateHandle,
+    message: &str,
+    frame: &[u8],
+    exclude_addr: Option<SocketAddr>,
+) -> Result<bool, ServerError> {
+    let _replay_barrier = state
+        .replay_barrier
+        .lock()
+        .map_err(|_| ServerError::ClientStatePoisoned)?;
+    state
+        .history
+        .lock()
+        .map_err(|_| ServerError::ClientStatePoisoned)?
+        .record(message);
+    broadcast(state, frame, exclude_addr)
+}
+
 fn outbound_writer(
     mut stream: TcpStream,
     receiver: mpsc::Receiver<Vec<u8>>,
@@ -449,7 +501,12 @@ pub fn broadcast_presence(state: &ServerStateHandle) -> Result<(), ServerError> 
     }
 }
 
-pub fn record_message(state: &ServerStateHandle, message: &str) -> Result<(), ServerError> {
+#[cfg(test)]
+pub(crate) fn record_message(state: &ServerStateHandle, message: &str) -> Result<(), ServerError> {
+    let _replay_barrier = state
+        .replay_barrier
+        .lock()
+        .map_err(|_| ServerError::ClientStatePoisoned)?;
     state
         .history
         .lock()
@@ -472,8 +529,8 @@ mod tests {
     use super::{
         ClientEntry, ClientToken, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP, MessageHistory,
         OUTBOUND_QUEUE_SIZE, allow_message, broadcast, history_snapshot, mark_client_ready,
-        new_shared_state, record_message, register_client, register_pending_client,
-        remove_client_if_current,
+        new_shared_state, record_and_broadcast, record_message, register_client,
+        register_pending_client, remove_client_if_current, with_history_replay,
     };
 
     #[test]
@@ -667,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn removing_the_last_client_resets_its_rate_limit() {
+    fn removing_the_last_client_keeps_its_rate_limit_for_reconnects() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (server_stream, client_addr) = listener.accept().unwrap();
@@ -686,9 +743,40 @@ mod tests {
 
         remove_client_if_current(&state, client_addr, &token).unwrap();
 
-        assert!(allow_message(&state, client_addr).is_ok());
+        let reconnect_client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (reconnect_server, reconnect_addr) = listener.accept().unwrap();
+        let reconnect_token = register_client(&state, &reconnect_server).unwrap();
+        assert!(allow_message(&state, reconnect_addr).is_err());
+
+        remove_client_if_current(&state, reconnect_addr, &reconnect_token).unwrap();
+        drop(reconnect_client);
+        drop(reconnect_server);
         drop(client_stream);
         drop(server_stream);
+    }
+
+    #[test]
+    fn history_replay_completes_before_live_broadcasts_are_delivered() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_stream, client_addr) = listener.accept().unwrap();
+        let state = new_shared_state();
+        let token = register_pending_client(&state, &server_stream).unwrap();
+
+        with_history_replay(&state, client_addr, &token, |_writer, history| {
+            assert!(history.is_empty());
+            mark_client_ready(&state, client_addr, &token)
+        })
+        .unwrap();
+        record_and_broadcast(&state, "live\n", b"live\n", None).unwrap();
+
+        client_stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut reader = BufReader::new(client_stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line, "live\n");
     }
 
     #[test]

@@ -14,8 +14,8 @@ use drocsid_protocol::{
 use tracing::{debug, info, warn};
 
 use super::state::{
-    ClientToken, ServerStateHandle, allow_message, broadcast, broadcast_presence, history_snapshot,
-    mark_client_ready, record_message, register_pending_client, set_client_username,
+    ClientToken, ServerStateHandle, allow_message, broadcast_presence, mark_client_ready,
+    record_and_broadcast, register_pending_client, set_client_username, with_history_replay,
 };
 
 const MAX_USERNAME_BYTES: usize = 32;
@@ -126,10 +126,9 @@ impl ConnectionHandler {
 
         let join_message = format!("@{} has entered the chat. Say hello!\n", username);
         info!(username = ?username, phase = "lifecycle", "client joined chat");
-        record_message(&self.state, &join_message)?;
         let join_frame = encode_frame(FrameType::Chat, join_message.trim_end().as_bytes())
             .map_err(|_| ServerError::MessageTooLong)?;
-        match broadcast(&self.state, &join_frame, None) {
+        match record_and_broadcast(&self.state, &join_message, &join_frame, None) {
             Ok(true) => broadcast_presence(&self.state)?,
             Ok(false) => {}
             Err(error) => {
@@ -285,10 +284,9 @@ impl ConnectionHandler {
             }
 
             let message = Self::format_server_message(username, &content);
-            record_message(&self.state, &message)?;
             let frame = encode_frame(FrameType::Chat, message.as_bytes())
                 .map_err(|_| ServerError::MessageTooLong)?;
-            match broadcast(&self.state, &frame, None) {
+            match record_and_broadcast(&self.state, &message, &frame, None) {
                 Ok(true) => broadcast_presence(&self.state)?,
                 Ok(false) => {}
                 Err(error) => {
@@ -323,10 +321,9 @@ impl ConnectionHandler {
 
         let leave_message = format!("{username} has left the chat\n");
         info!(username = ?username, phase = "lifecycle", "client left chat");
-        record_message(&self.state, &leave_message)?;
         let leave_frame = encode_frame(FrameType::Chat, leave_message.trim_end().as_bytes())
             .map_err(|_| ServerError::MessageTooLong)?;
-        broadcast(&self.state, &leave_frame, None)?;
+        record_and_broadcast(&self.state, &leave_message, &leave_frame, None)?;
         broadcast_presence(&self.state)?;
 
         Ok(())
@@ -337,18 +334,20 @@ impl ConnectionHandler {
         sender_addr: SocketAddr,
         token: &ClientToken,
     ) -> Result<(), ServerError> {
-        let (writer, history) = history_snapshot(&self.state, sender_addr, token)?;
+        with_history_replay(&self.state, sender_addr, token, |writer, history| {
+            for message in history {
+                let frame = encode_frame(FrameType::Chat, message.as_bytes())
+                    .map_err(|_| ServerError::MessageTooLong)?;
+                writer.try_send(frame).map_err(|error| match error {
+                    std::sync::mpsc::TrySendError::Full(_) => ServerError::OutboundQueueFull,
+                    std::sync::mpsc::TrySendError::Disconnected(_) => {
+                        ServerError::OutboundWriterGone
+                    }
+                })?;
+            }
 
-        for message in history {
-            let frame = encode_frame(FrameType::Chat, message.as_bytes())
-                .map_err(|_| ServerError::MessageTooLong)?;
-            writer.try_send(frame).map_err(|error| match error {
-                std::sync::mpsc::TrySendError::Full(_) => ServerError::OutboundQueueFull,
-                std::sync::mpsc::TrySendError::Disconnected(_) => ServerError::OutboundWriterGone,
-            })?;
-        }
-
-        Ok(())
+            mark_client_ready(&self.state, sender_addr, token)
+        })
     }
 }
 
@@ -397,7 +396,9 @@ mod tests {
     use super::{ConnectionHandler, FrameReader};
     use crate::{
         ServerError,
-        state::{new_shared_state, register_client, set_client_username, usernames},
+        state::{
+            history_snapshot, new_shared_state, register_client, set_client_username, usernames,
+        },
     };
 
     #[test]
@@ -574,7 +575,7 @@ mod tests {
 
         assert!(matches!(error, ServerError::InvalidFrameType));
 
-        let (_, history) = super::history_snapshot(&state, client_addr, &token).unwrap();
+        let (_, history) = history_snapshot(&state, client_addr, &token).unwrap();
         assert!(history.is_empty());
 
         client_stream
