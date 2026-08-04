@@ -35,6 +35,14 @@ pub enum ServerError {
     MessageTooLong,
     #[error("message uses a reserved protocol prefix")]
     ReservedMessagePrefix,
+    #[error("received an unexpected protocol frame type")]
+    InvalidFrameType,
+    #[error("unsupported protocol version")]
+    UnsupportedProtocolVersion,
+    #[error("unknown protocol frame type")]
+    UnknownProtocolFrameType,
+    #[error("truncated protocol frame")]
+    TruncatedProtocolFrame,
     #[error("received invalid UTF-8 data")]
     InvalidUtf8,
     #[error("connection limit reached")]

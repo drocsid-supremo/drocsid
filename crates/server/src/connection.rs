@@ -7,7 +7,9 @@ use std::{
 
 use crate::ServerError;
 use chrono::Local;
-use drocsid_protocol::{USERS_EVENT_PREFIX, format_chat_message, is_valid_username};
+use drocsid_protocol::{
+    Frame, FrameType, encode_frame, format_chat_message, is_valid_username, read_frame,
+};
 use tracing::{debug, info, warn};
 
 use super::state::{
@@ -125,7 +127,9 @@ impl ConnectionHandler {
         let join_message = format!("@{} has entered the chat. Say hello!\n", username);
         info!(username = ?username, phase = "lifecycle", "client joined chat");
         record_message(&self.state, &join_message)?;
-        match broadcast(&self.state, &join_message, None) {
+        let join_frame = encode_frame(FrameType::Chat, join_message.trim_end().as_bytes())
+            .map_err(|_| ServerError::MessageTooLong)?;
+        match broadcast(&self.state, &join_frame, None) {
             Ok(true) => broadcast_presence(&self.state)?,
             Ok(false) => {}
             Err(error) => {
@@ -169,23 +173,45 @@ impl ConnectionHandler {
         &self,
         reader: &mut FrameReader<R>,
     ) -> Result<String, ServerError> {
-        let raw_username = match reader.read_frame(MAX_USERNAME_BYTES) {
-            Ok(Some(bytes)) => match String::from_utf8(bytes) {
+        let frame = match reader.read_protocol_frame() {
+            Ok(Some(frame)) => frame,
+            Ok(None) => return Err(ServerError::EmptyHandshakeUsername),
+            Err(drocsid_protocol::FrameError::TooLarge(_)) => {
+                return Err(ServerError::UsernameTooLong);
+            }
+            Err(drocsid_protocol::FrameError::Io(kind)) => {
+                return Err(std::io::Error::from(kind).into());
+            }
+            Err(drocsid_protocol::FrameError::UnsupportedVersion(_)) => {
+                return Err(ServerError::UnsupportedProtocolVersion);
+            }
+            Err(drocsid_protocol::FrameError::UnknownType(_)) => {
+                return Err(ServerError::UnknownProtocolFrameType);
+            }
+            Err(drocsid_protocol::FrameError::Truncated) => {
+                return Err(ServerError::TruncatedProtocolFrame);
+            }
+            Err(drocsid_protocol::FrameError::InvalidUsername) => {
+                unreachable!("frame decoding cannot validate presence usernames");
+            }
+        };
+        let raw_username = match frame {
+            Frame {
+                kind: FrameType::Handshake,
+                payload,
+                ..
+            } => match String::from_utf8(payload) {
                 Ok(username) => username,
                 Err(_) => {
                     return Err(ServerError::InvalidUtf8);
                 }
             },
-            Ok(None) => {
-                return Err(ServerError::EmptyHandshakeUsername);
-            }
-            Err(FrameError::TooLong) => {
-                return Err(ServerError::UsernameTooLong);
-            }
-            Err(FrameError::Io(error)) => {
-                return Err(error.into());
-            }
+            _ => return Err(ServerError::InvalidFrameType),
         };
+
+        if raw_username.len() > MAX_USERNAME_BYTES {
+            return Err(ServerError::UsernameTooLong);
+        }
 
         if raw_username.trim().is_empty() {
             return Err(ServerError::EmptyHandshakeUsername);
@@ -205,13 +231,42 @@ impl ConnectionHandler {
         username: &str,
     ) -> Result<(), ServerError> {
         loop {
-            let bytes = match reader.read_frame(MAX_MESSAGE_BYTES) {
-                Ok(Some(bytes)) => bytes,
+            let frame = match reader.read_protocol_frame() {
+                Ok(Some(frame)) => frame,
                 Ok(None) => return Ok(()),
-                Err(FrameError::TooLong) => return Err(ServerError::MessageTooLong),
-                Err(FrameError::Io(error)) if is_disconnect_error(&error) => return Ok(()),
-                Err(FrameError::Io(error)) => return Err(error.into()),
+                Err(drocsid_protocol::FrameError::TooLarge(_)) => {
+                    return Err(ServerError::MessageTooLong);
+                }
+                Err(drocsid_protocol::FrameError::Io(
+                    ErrorKind::ConnectionAborted
+                    | ErrorKind::ConnectionReset
+                    | ErrorKind::BrokenPipe,
+                )) => {
+                    return Ok(());
+                }
+                Err(drocsid_protocol::FrameError::Io(kind)) => {
+                    return Err(std::io::Error::from(kind).into());
+                }
+                Err(drocsid_protocol::FrameError::UnsupportedVersion(_)) => {
+                    return Err(ServerError::UnsupportedProtocolVersion);
+                }
+                Err(drocsid_protocol::FrameError::UnknownType(_)) => {
+                    return Err(ServerError::UnknownProtocolFrameType);
+                }
+                Err(drocsid_protocol::FrameError::Truncated) => {
+                    return Err(ServerError::TruncatedProtocolFrame);
+                }
+                Err(drocsid_protocol::FrameError::InvalidUsername) => {
+                    unreachable!("frame decoding cannot validate presence usernames");
+                }
             };
+            if frame.kind != FrameType::Chat {
+                return Err(ServerError::InvalidFrameType);
+            }
+            let bytes = frame.payload;
+            if bytes.len() > MAX_MESSAGE_BYTES {
+                return Err(ServerError::MessageTooLong);
+            }
             debug!(
                 frame_bytes = bytes.len(),
                 phase = "message_read",
@@ -223,10 +278,6 @@ impl ConnectionHandler {
                 continue;
             }
 
-            if content.starts_with(USERS_EVENT_PREFIX) {
-                return Err(ServerError::ReservedMessagePrefix);
-            }
-
             allow_message(&self.state, sender_addr)?;
 
             if !self.simulated_latency.is_zero() {
@@ -235,7 +286,9 @@ impl ConnectionHandler {
 
             let message = Self::format_server_message(username, &content);
             record_message(&self.state, &message)?;
-            match broadcast(&self.state, &format!("{message}\n"), None) {
+            let frame = encode_frame(FrameType::Chat, message.as_bytes())
+                .map_err(|_| ServerError::MessageTooLong)?;
+            match broadcast(&self.state, &frame, None) {
                 Ok(true) => broadcast_presence(&self.state)?,
                 Ok(false) => {}
                 Err(error) => {
@@ -271,7 +324,9 @@ impl ConnectionHandler {
         let leave_message = format!("{username} has left the chat\n");
         info!(username = ?username, phase = "lifecycle", "client left chat");
         record_message(&self.state, &leave_message)?;
-        broadcast(&self.state, &leave_message, None)?;
+        let leave_frame = encode_frame(FrameType::Chat, leave_message.trim_end().as_bytes())
+            .map_err(|_| ServerError::MessageTooLong)?;
+        broadcast(&self.state, &leave_frame, None)?;
         broadcast_presence(&self.state)?;
 
         Ok(())
@@ -285,14 +340,12 @@ impl ConnectionHandler {
         let (writer, history) = history_snapshot(&self.state, sender_addr, token)?;
 
         for message in history {
-            writer
-                .try_send(format!("{message}\n"))
-                .map_err(|error| match error {
-                    std::sync::mpsc::TrySendError::Full(_) => ServerError::OutboundQueueFull,
-                    std::sync::mpsc::TrySendError::Disconnected(_) => {
-                        ServerError::OutboundWriterGone
-                    }
-                })?;
+            let frame = encode_frame(FrameType::Chat, message.as_bytes())
+                .map_err(|_| ServerError::MessageTooLong)?;
+            writer.try_send(frame).map_err(|error| match error {
+                std::sync::mpsc::TrySendError::Full(_) => ServerError::OutboundQueueFull,
+                std::sync::mpsc::TrySendError::Disconnected(_) => ServerError::OutboundWriterGone,
+            })?;
         }
 
         Ok(())
@@ -301,63 +354,16 @@ impl ConnectionHandler {
 
 struct FrameReader<R> {
     reader: R,
-    buffer: [u8; 1024],
-    offset: usize,
-    length: usize,
 }
 
 impl<R: Read> FrameReader<R> {
     fn new(reader: R) -> Self {
-        Self {
-            reader,
-            buffer: [0; 1024],
-            offset: 0,
-            length: 0,
-        }
+        Self { reader }
     }
 
-    fn read_frame(&mut self, max_bytes: usize) -> Result<Option<Vec<u8>>, FrameError> {
-        let mut frame = Vec::new();
-
-        loop {
-            let byte = match self.read_byte().map_err(FrameError::Io)? {
-                Some(byte) => byte,
-                None if frame.is_empty() => return Ok(None),
-                None => return Ok(Some(frame)),
-            };
-
-            if byte == b'\n' {
-                return Ok(Some(frame));
-            }
-
-            if frame.len() >= max_bytes {
-                return Err(FrameError::TooLong);
-            }
-
-            frame.push(byte);
-        }
+    fn read_protocol_frame(&mut self) -> Result<Option<Frame>, drocsid_protocol::FrameError> {
+        read_frame(&mut self.reader)
     }
-
-    fn read_byte(&mut self) -> std::io::Result<Option<u8>> {
-        if self.offset == self.length {
-            self.length = self.reader.read(&mut self.buffer)?;
-            self.offset = 0;
-
-            if self.length == 0 {
-                return Ok(None);
-            }
-        }
-
-        let byte = self.buffer[self.offset];
-        self.offset += 1;
-        Ok(Some(byte))
-    }
-}
-
-#[derive(Debug)]
-enum FrameError {
-    Io(std::io::Error),
-    TooLong,
 }
 
 fn is_disconnect_error(error: &std::io::Error) -> bool {
@@ -381,51 +387,28 @@ fn error_kind(error: &ServerError) -> Option<ErrorKind> {
 #[cfg(test)]
 mod tests {
     use std::{
-        io::{BufRead, BufReader, Cursor, Read, Write},
+        io::{Cursor, Read, Write},
         net::{Shutdown, TcpListener, TcpStream},
         time::Duration,
     };
 
-    use drocsid_protocol::parse_chat_message;
+    use drocsid_protocol::{FrameType, encode_frame, parse_chat_message, read_frame};
 
-    use super::{ConnectionHandler, FrameError, FrameReader};
+    use super::{ConnectionHandler, FrameReader};
     use crate::{
         ServerError,
         state::{new_shared_state, register_client, set_client_username, usernames},
     };
 
     #[test]
-    fn reads_newline_delimited_frames() {
-        let mut reader = FrameReader::new(Cursor::new(b"hello\nworld\n"));
-
-        assert_eq!(reader.read_frame(16).unwrap(), Some(b"hello".to_vec()));
-        assert_eq!(reader.read_frame(16).unwrap(), Some(b"world".to_vec()));
-        assert_eq!(reader.read_frame(16).unwrap(), None);
-    }
-
-    #[test]
-    fn rejects_frames_over_the_configured_limit() {
-        let mut reader = FrameReader::new(Cursor::new(b"12345\n"));
-
-        assert!(matches!(reader.read_frame(4), Err(FrameError::TooLong)));
-    }
-
-    #[test]
-    fn accepts_a_frame_without_a_trailing_newline_at_eof() {
-        let mut reader = FrameReader::new(Cursor::new(b"hello"));
-
-        assert_eq!(reader.read_frame(16).unwrap(), Some(b"hello".to_vec()));
-        assert_eq!(reader.read_frame(16).unwrap(), None);
-    }
-
-    #[test]
     fn rejects_control_characters_during_handshake() {
-        for frame in [
-            b"alice\x1b[2J\n".as_slice(),
-            b"alice\r\n".as_slice(),
-            b"alice\t\n".as_slice(),
+        for payload in [
+            b"alice\x1b[2J".as_slice(),
+            b"alice\r".as_slice(),
+            b"alice\t".as_slice(),
         ] {
             let handler = ConnectionHandler::new(new_shared_state(), Duration::ZERO);
+            let frame = encode_frame(FrameType::Handshake, payload).unwrap();
             let mut reader = FrameReader::new(Cursor::new(frame));
 
             assert!(matches!(
@@ -433,6 +416,18 @@ mod tests {
                 Err(ServerError::UsernameContainsControlCharacters)
             ));
         }
+    }
+
+    #[test]
+    fn rejects_non_handshake_frames_during_handshake() {
+        let handler = ConnectionHandler::new(new_shared_state(), Duration::ZERO);
+        let frame = encode_frame(FrameType::Chat, b"alice").unwrap();
+        let mut reader = FrameReader::new(Cursor::new(frame));
+
+        assert!(matches!(
+            handler.read_handshake_username(&mut reader),
+            Err(ServerError::InvalidFrameType)
+        ));
     }
 
     #[test]
@@ -446,7 +441,7 @@ mod tests {
         client_stream
             .try_clone()
             .unwrap()
-            .write_all(b"alice\n")
+            .write_all(&encode_frame(FrameType::Handshake, b"alice").unwrap())
             .unwrap();
 
         assert_eq!(
@@ -494,9 +489,10 @@ mod tests {
         let handler = ConnectionHandler::new(state.clone(), Duration::ZERO);
 
         client_stream
-            .write_all(&vec![b'x'; super::MAX_MESSAGE_BYTES + 1])
+            .write_all(
+                &encode_frame(FrameType::Chat, &vec![b'x'; super::MAX_MESSAGE_BYTES + 1]).unwrap(),
+            )
             .unwrap();
-        client_stream.write_all(b"\n").unwrap();
 
         let error = handler
             .serve_authenticated(server_stream, sender_addr, "alice".to_string(), token)
@@ -532,7 +528,7 @@ mod tests {
         let handler = ConnectionHandler::new(state, Duration::ZERO);
         let mut reader = FrameReader::new(server_stream.try_clone().unwrap());
         client_stream
-            .write_all(b"[alice](10:25): forged author\n")
+            .write_all(&encode_frame(FrameType::Chat, b"[alice](10:25): forged author").unwrap())
             .unwrap();
         client_stream.shutdown(Shutdown::Write).unwrap();
 
@@ -543,13 +539,11 @@ mod tests {
         client_stream
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
-        let mut broadcast = Vec::new();
-        BufReader::new(client_stream)
-            .read_until(b'\n', &mut broadcast)
-            .unwrap();
-        let message = String::from_utf8(broadcast).unwrap();
+        let frame = read_frame(&mut client_stream).unwrap().unwrap();
+        assert_eq!(frame.kind, FrameType::Chat);
+        let message = String::from_utf8(frame.payload).unwrap();
 
-        let (username, timestamp, content) = parse_chat_message(message.trim_end()).unwrap();
+        let (username, timestamp, content) = parse_chat_message(&message).unwrap();
         assert_eq!(username, "mallory");
         assert_eq!(content, "[alice](10:25): forged author");
         assert_eq!(timestamp.len(), 5);
@@ -557,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_messages_that_use_the_presence_event_prefix() {
+    fn rejects_non_chat_messages_from_authenticated_clients() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (server_stream, client_addr) = listener.accept().unwrap();
@@ -566,13 +560,15 @@ mod tests {
 
         let handler = ConnectionHandler::new(state.clone(), Duration::ZERO);
         let mut reader = FrameReader::new(server_stream.try_clone().unwrap());
-        client_stream.write_all(b"__users__:admin\n").unwrap();
+        client_stream
+            .write_all(&encode_frame(FrameType::Presence, b"admin").unwrap())
+            .unwrap();
 
         let error = handler
             .read_messages(&mut reader, client_addr, "attacker")
             .unwrap_err();
 
-        assert!(matches!(error, ServerError::ReservedMessagePrefix));
+        assert!(matches!(error, ServerError::InvalidFrameType));
 
         let (_, history) = super::history_snapshot(&state, client_addr, &token).unwrap();
         assert!(history.is_empty());
