@@ -8,7 +8,8 @@ use std::{
 use crate::ServerError;
 use chrono::Local;
 use drocsid_protocol::{
-    Frame, FrameType, encode_frame, format_chat_message, is_valid_username, read_frame,
+    Frame, FrameType, MAX_CHAT_MESSAGE_BYTES, encode_frame, format_chat_message, is_valid_username,
+    read_frame,
 };
 use tracing::{debug, info, warn};
 
@@ -17,7 +18,6 @@ use super::state::{
     mark_client_ready, record_message, register_pending_client, set_client_username,
 };
 
-const MAX_MESSAGE_BYTES: usize = 4 * 1024;
 const MAX_USERNAME_BYTES: usize = 32;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -192,7 +192,7 @@ impl ConnectionHandler {
                 return Err(ServerError::TruncatedProtocolFrame);
             }
             Err(drocsid_protocol::FrameError::InvalidUsername) => {
-                unreachable!("frame decoding cannot validate presence usernames");
+                return Err(ServerError::InvalidFrameType);
             }
         };
         let raw_username = match frame {
@@ -257,14 +257,14 @@ impl ConnectionHandler {
                     return Err(ServerError::TruncatedProtocolFrame);
                 }
                 Err(drocsid_protocol::FrameError::InvalidUsername) => {
-                    unreachable!("frame decoding cannot validate presence usernames");
+                    return Err(ServerError::InvalidFrameType);
                 }
             };
             if frame.kind != FrameType::Chat {
                 return Err(ServerError::InvalidFrameType);
             }
             let bytes = frame.payload;
-            if bytes.len() > MAX_MESSAGE_BYTES {
+            if bytes.len() > MAX_CHAT_MESSAGE_BYTES {
                 return Err(ServerError::MessageTooLong);
             }
             debug!(
@@ -490,7 +490,11 @@ mod tests {
 
         client_stream
             .write_all(
-                &encode_frame(FrameType::Chat, &vec![b'x'; super::MAX_MESSAGE_BYTES + 1]).unwrap(),
+                &encode_frame(
+                    FrameType::Chat,
+                    &vec![b'x'; super::MAX_CHAT_MESSAGE_BYTES + 1],
+                )
+                .unwrap(),
             )
             .unwrap();
 

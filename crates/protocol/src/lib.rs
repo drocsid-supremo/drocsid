@@ -2,6 +2,7 @@ use std::io::{self, Read};
 
 pub const CURRENT_PROTOCOL_VERSION: u8 = 1;
 pub const FRAME_HEADER_BYTES: usize = 6;
+pub const MAX_CHAT_MESSAGE_BYTES: usize = 4 * 1024;
 pub const MAX_FRAME_PAYLOAD_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

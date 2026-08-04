@@ -366,7 +366,18 @@ pub fn usernames(state: &ServerStateHandle) -> Result<Vec<String>, ServerError> 
 pub fn broadcast_presence(state: &ServerStateHandle) -> Result<(), ServerError> {
     loop {
         let users = usernames(state)?;
-        let frame = encode_presence(&users).map_err(|_| ServerError::OutboundQueueFull)?;
+        let frame = match encode_presence(&users) {
+            Ok(frame) => frame,
+            Err(error) => {
+                warn!(
+                    error = ?error,
+                    error_kind = "presence_encoding",
+                    phase = "presence",
+                    "failed to encode presence frame"
+                );
+                return Err(ServerError::PresenceEncodingFailed);
+            }
+        };
         if !broadcast(state, &frame, None)? {
             return Ok(());
         }

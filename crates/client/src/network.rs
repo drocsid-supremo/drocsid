@@ -6,7 +6,9 @@ use std::{
 };
 
 use drocsid_config::ServerConfig;
-use drocsid_protocol::{Frame, FrameType, encode_frame, parse_presence, read_frame};
+use drocsid_protocol::{
+    Frame, FrameType, MAX_CHAT_MESSAGE_BYTES, encode_frame, parse_presence, read_frame,
+};
 use tracing::{debug, info, warn};
 
 const NETWORK_EVENT_CAPACITY: usize = 256;
@@ -83,8 +85,7 @@ impl ClientConnection {
     }
 
     pub fn send_message(&mut self, message: &str) -> std::io::Result<()> {
-        let frame = encode_frame(FrameType::Chat, message.as_bytes())
-            .map_err(|_| std::io::Error::new(ErrorKind::InvalidInput, "message is too large"))?;
+        let frame = encode_chat_frame(message)?;
         if let Err(error) = self.stream.write_all(&frame) {
             warn!(
                 server_addr = %self.server_addr,
@@ -106,6 +107,18 @@ impl ClientConnection {
             ErrorKind::BrokenPipe | ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset
         )
     }
+}
+
+fn encode_chat_frame(message: &str) -> std::io::Result<Vec<u8>> {
+    if message.len() > MAX_CHAT_MESSAGE_BYTES {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "message is too large",
+        ));
+    }
+
+    encode_frame(FrameType::Chat, message.as_bytes())
+        .map_err(|_| std::io::Error::new(ErrorKind::InvalidInput, "message is too large"))
 }
 
 fn spawn_reader(
@@ -240,5 +253,31 @@ mod tests {
             rx.recv().unwrap(),
             NetworkEvent::Disconnected(reason) if reason == "server sent an invalid presence payload"
         ));
+    }
+
+    #[test]
+    fn disconnects_on_unexpected_handshake_frame() {
+        let (tx, rx) = mpsc::sync_channel(NETWORK_EVENT_CAPACITY);
+        assert!(!process_frame(
+            Frame {
+                version: 1,
+                kind: super::FrameType::Handshake,
+                payload: b"alice".to_vec(),
+            },
+            &tx,
+        ));
+        assert!(matches!(
+            rx.recv().unwrap(),
+            NetworkEvent::Disconnected(reason)
+                if reason == "server sent an unexpected handshake frame"
+        ));
+    }
+
+    #[test]
+    fn rejects_chat_messages_over_the_wire_limit_before_encoding() {
+        let error =
+            super::encode_chat_frame(&"x".repeat(super::MAX_CHAT_MESSAGE_BYTES + 1)).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 }

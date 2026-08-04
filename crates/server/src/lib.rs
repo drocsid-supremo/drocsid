@@ -33,8 +33,6 @@ pub enum ServerError {
     UsernameTooLong,
     #[error("message exceeds the maximum length")]
     MessageTooLong,
-    #[error("message uses a reserved protocol prefix")]
-    ReservedMessagePrefix,
     #[error("received an unexpected protocol frame type")]
     InvalidFrameType,
     #[error("unsupported protocol version")]
@@ -43,6 +41,8 @@ pub enum ServerError {
     UnknownProtocolFrameType,
     #[error("truncated protocol frame")]
     TruncatedProtocolFrame,
+    #[error("failed to encode a presence frame")]
+    PresenceEncodingFailed,
     #[error("received invalid UTF-8 data")]
     InvalidUtf8,
     #[error("connection limit reached")]
