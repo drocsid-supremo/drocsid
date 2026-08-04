@@ -5,6 +5,7 @@ mod state;
 use drocsid_config::ServerConfig;
 use std::{
     collections::HashMap,
+    io::ErrorKind,
     net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
 };
@@ -130,7 +131,16 @@ async fn run_server_async(config: &ServerConfig) -> Result<(), ServerError> {
     });
     info!(bind_addr = %address, max_connections = MAX_CONNECTIONS, max_connections_per_ip = MAX_CONNECTIONS_PER_IP, simulated_latency_ms = config.simulated_latency.as_millis(), "server listening");
     loop {
-        let (stream, peer_addr) = listener.accept().await?;
+        let (stream, peer_addr) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                warn!(error = %error, error_kind = ?error.kind(), phase = "accept", "failed to accept connection");
+                if error.kind() == ErrorKind::Other {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                continue;
+            }
+        };
         info!(%peer_addr, "connection accepted");
         let Some(permit) = admission.try_acquire(peer_addr) else {
             warn!(%peer_addr, phase = "admission", "connection limit reached");

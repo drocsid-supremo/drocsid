@@ -240,12 +240,12 @@ pub(crate) fn mark_client_ready(
         match client.writer.try_send(message) {
             Ok(()) => {}
             Err(TrySendError::Full(message)) => {
-                client.pending_messages.push(message.clone());
+                client.pending_messages.push(message);
                 client.pending_messages.extend(remaining);
                 return Err(ServerError::OutboundQueueFull);
             }
             Err(TrySendError::Closed(message)) => {
-                client.pending_messages.push(message.clone());
+                client.pending_messages.push(message);
                 client.pending_messages.extend(remaining);
                 return Err(ServerError::OutboundWriterGone);
             }
@@ -541,7 +541,7 @@ fn prune_overloaded_clients(state: &ServerStateHandle) -> Result<(), ServerError
             .map_err(|_| ServerError::ClientStatePoisoned)?;
         for client in deliveries.by_addr.values().flatten() {
             let overloaded = if client.ready {
-                client.writer.is_closed() || client.writer.capacity() == 0
+                client.writer.is_closed()
             } else {
                 client.pending_messages.len() >= PENDING_MESSAGES_LIMIT
             };
@@ -586,8 +586,8 @@ mod tests {
     use super::{
         ClientSession, ClientToken, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP, MessageHistory,
         OUTBOUND_QUEUE_SIZE, OutboundMessage, RATE_LIMIT_IDLE_EXPIRY, RateLimitState,
-        allow_message, broadcast, cleanup_rate_limits, history_snapshot, mark_client_ready,
-        new_shared_state, record_and_broadcast, record_message, register_client,
+        allow_message, broadcast, broadcast_presence, cleanup_rate_limits, history_snapshot,
+        mark_client_ready, new_shared_state, record_and_broadcast, record_message, register_client,
         register_client_with_status, register_pending_client_for_test, remove_client_if_current,
         with_history_replay,
     };
@@ -708,6 +708,40 @@ mod tests {
 
         assert!(state.clients.lock().unwrap().by_addr.is_empty());
         drop(receiver);
+    }
+
+    #[test]
+    fn presence_prunes_closed_clients_and_broadcasts_once_to_active_clients() {
+        let state = new_shared_state();
+        let closed_address: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let active_address: SocketAddr = "127.0.0.2:12345".parse().unwrap();
+        let (closed_writer, closed_receiver) = tokio::sync::mpsc::channel(1);
+        let (active_writer, mut active_receiver) = tokio::sync::mpsc::channel(1);
+
+        register_client_with_status(&state, closed_address, closed_writer, None, true).unwrap();
+        register_client_with_status(&state, active_address, active_writer, None, true).unwrap();
+        drop(closed_receiver);
+
+        broadcast_presence(&state).unwrap();
+
+        assert!(
+            !state
+                .clients
+                .lock()
+                .unwrap()
+                .by_addr
+                .contains_key(&closed_address)
+        );
+        assert!(
+            state
+                .clients
+                .lock()
+                .unwrap()
+                .by_addr
+                .contains_key(&active_address)
+        );
+        assert!(active_receiver.try_recv().is_ok());
+        assert!(active_receiver.try_recv().is_err());
     }
 
     #[test]
