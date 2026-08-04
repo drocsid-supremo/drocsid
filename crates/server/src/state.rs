@@ -313,12 +313,8 @@ pub fn allow_message(
         .lock()
         .map_err(|_| ServerError::ClientStatePoisoned)?;
     let now = Instant::now();
-    if rate_limits
-        .get(&sender_addr.ip())
-        .is_some_and(|limiter| now.duration_since(limiter.last_refill) >= RATE_LIMIT_IDLE_EXPIRY)
-    {
-        rate_limits.remove(&sender_addr.ip());
-    }
+    rate_limits
+        .retain(|_, limiter| now.duration_since(limiter.last_refill) < RATE_LIMIT_IDLE_EXPIRY);
     let limiter = rate_limits
         .entry(sender_addr.ip())
         .or_insert_with(|| RateLimitState {
@@ -520,17 +516,18 @@ pub(crate) fn record_message(state: &ServerStateHandle, message: &str) -> Result
 mod tests {
     use std::{
         io::{BufRead, BufReader, Read},
-        net::{SocketAddr, TcpListener, TcpStream},
+        net::{IpAddr, SocketAddr, TcpListener, TcpStream},
         sync::mpsc,
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use super::{
         ClientEntry, ClientToken, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_IP, MessageHistory,
-        OUTBOUND_QUEUE_SIZE, allow_message, broadcast, history_snapshot, mark_client_ready,
-        new_shared_state, record_and_broadcast, record_message, register_client,
-        register_pending_client, remove_client_if_current, with_history_replay,
+        OUTBOUND_QUEUE_SIZE, RATE_LIMIT_IDLE_EXPIRY, RateLimitState, allow_message, broadcast,
+        history_snapshot, mark_client_ready, new_shared_state, record_and_broadcast,
+        record_message, register_client, register_pending_client, remove_client_if_current,
+        with_history_replay,
     };
 
     #[test]
@@ -753,6 +750,41 @@ mod tests {
         drop(reconnect_server);
         drop(client_stream);
         drop(server_stream);
+    }
+
+    #[test]
+    fn rate_limit_cleanup_reclaims_stale_entries_from_other_ips() {
+        let state = new_shared_state();
+        let stale_ips: [IpAddr; 2] = ["192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap()];
+        let active_ip: IpAddr = "192.0.2.3".parse().unwrap();
+        let stale_time = Instant::now() - RATE_LIMIT_IDLE_EXPIRY - Duration::from_secs(1);
+
+        {
+            let mut rate_limits = state.rate_limits.lock().unwrap();
+            for ip in stale_ips {
+                rate_limits.insert(
+                    ip,
+                    RateLimitState {
+                        tokens: 0.0,
+                        last_refill: stale_time,
+                    },
+                );
+            }
+            rate_limits.insert(
+                active_ip,
+                RateLimitState {
+                    tokens: 1.0,
+                    last_refill: Instant::now(),
+                },
+            );
+        }
+
+        allow_message(&state, SocketAddr::new(active_ip, 1234)).unwrap();
+
+        let rate_limits = state.rate_limits.lock().unwrap();
+        assert!(!rate_limits.contains_key(&stale_ips[0]));
+        assert!(!rate_limits.contains_key(&stale_ips[1]));
+        assert!(rate_limits.contains_key(&active_ip));
     }
 
     #[test]
