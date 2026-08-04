@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+
+- (`Protocol`) [**breaking**] Add versioned typed wire framing ([#51](https://github.com/drocsid-supremo/drocsid/pull/51))
+
+- (`Server`) Migrate sessions to async TCP ([#55](https://github.com/drocsid-supremo/drocsid/pull/55))
+
+
+### Other
+
+
+- (`Server`) Stabilize async session tests ([#56](https://github.com/drocsid-supremo/drocsid/pull/56))
+
+- (`Server`) Separate delivery registry ([#53](https://github.com/drocsid-supremo/drocsid/pull/53))
+
+- (`Server`) Index shared state by client address ([#52](https://github.com/drocsid-supremo/drocsid/pull/52))
+
+
 ### Fixed
 
 
